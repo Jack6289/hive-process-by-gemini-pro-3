@@ -134,45 +134,85 @@ const App: React.FC = () => {
   };
 
   const handleDeleteAllFindings = () => {
-    if (!fileData || scanResults.length === 0) return;
-    if (!window.confirm(`WARNING: This will permanently corrupt ${scanResults.length} identified keys in the binary structure. Proceed?`)) return;
+    if (!fileData) return;
+    
+    const activeCount = scanResults.filter(f => !f.isDeleted).length;
+    if (activeCount === 0) return;
 
+    if (!window.confirm(`WARNING: This will permanently corrupt ${activeCount} keys. Proceed?`)) return;
+
+    // Create a SINGLE copy of the buffer for all patches
     const newBuffer = new Uint8Array(fileData);
     
-    const updatedResults = scanResults.map(f => {
-      if (f.isDeleted) return f; // Skip already deleted
+    setScanResults(prevResults => {
+      return prevResults.map(f => {
+        if (f.isDeleted) return f; // Already deleted
 
-      // Safety check: Ensure we are within bounds
-      if (f.offset + 1 < newBuffer.length) {
-        // 1. Patch 'nk' signature to 'XX'
-        newBuffer[f.offset] = 0x58;
-        newBuffer[f.offset + 1] = 0x58;
-
-        // 2. Zero out Name Length (0x48)
-        if (f.offset + 0x49 < newBuffer.length) {
-           newBuffer[f.offset + 0x48] = 0x00;
-           newBuffer[f.offset + 0x49] = 0x00;
+        // Patch Binary
+        if (f.offset + 1 < newBuffer.length) {
+           // 1. Signature
+           newBuffer[f.offset] = 0x58;
+           newBuffer[f.offset + 1] = 0x58;
+           // 2. Length
+           if (f.offset + 0x49 < newBuffer.length) {
+             newBuffer[f.offset + 0x48] = 0x00;
+             newBuffer[f.offset + 0x49] = 0x00;
+           }
+           return { ...f, isDeleted: true };
         }
-
-        return { ...f, isDeleted: true };
-      }
-      return f;
+        return f;
+      });
     });
 
+    // Update Binary State ONCE
     setFileData(newBuffer);
-    setScanResults(updatedResults);
 
-    // Refresh selection if active
-    if (selectedBytes && selectionOffset > 0) {
-      // Re-read from new buffer at current selection
+    // Force refresh of selected bytes to show "XX XX" immediately if looking at a key
+    if (selectedBytes && selectionOffset >= 0) {
       const len = selectedBytes.length;
-      setSelectedBytes(newBuffer.slice(selectionOffset, selectionOffset + len));
+      const newSelection = newBuffer.slice(selectionOffset, selectionOffset + len);
+      setSelectedBytes(newSelection);
     }
+  };
+
+  // Normalizes the Hive Header to ensure Regedit treats it as a valid, clean file.
+  const finalizeHiveHeader = (buffer: Uint8Array) => {
+    if (buffer.length < 0x200) return;
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    
+    // 1. Synchronize Sequence Numbers (Offset 0x04 & 0x08)
+    const seq1 = view.getUint32(0x04, true);
+    const seq2 = view.getUint32(0x08, true);
+    const newSeq = Math.max(seq1, seq2) + 1;
+    
+    view.setUint32(0x04, newSeq, true); // Primary
+    view.setUint32(0x08, newSeq, true); // Secondary
+
+    // 2. Update Header Length (Offset 0x28)
+    view.setUint32(0x28, buffer.length, true);
+
+    // 3. Recalculate Header Checksum (Offset 0x1FC)
+    let checksum = 0;
+    for (let i = 0; i < 0x1FC; i += 4) {
+      checksum ^= view.getUint32(i, true);
+    }
+    view.setUint32(0x1FC, checksum, true);
   };
 
   const handleDownload = () => {
     if (!fileData) return;
-    const blob = new Blob([fileData], { type: "application/octet-stream" });
+    
+    // FIX: Ensure 4KB Alignment (Padding) for Regedit compatibility
+    const remainder = fileData.length % 4096;
+    const padding = remainder === 0 ? 0 : 4096 - remainder;
+    const totalSize = fileData.length + padding;
+
+    const outputBuffer = new Uint8Array(totalSize);
+    outputBuffer.set(fileData);
+    
+    finalizeHiveHeader(outputBuffer);
+
+    const blob = new Blob([outputBuffer], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

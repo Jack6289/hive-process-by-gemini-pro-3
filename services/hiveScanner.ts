@@ -19,8 +19,21 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   while (cursor < len - 8) {
     const sig = view.getUint16(cursor, true);
 
-    // We look for nk signatures anywhere in the data to catch unallocated/slack space too
-    if (sig === SIG_NK) {
+    // Case 1: Explicitly Destroyed Artifact
+    if (sig === SIG_DESTROYED) {
+       findings.push({
+          id: `destroyed-${cursor}`,
+          offset: cursor,
+          length: 80, // Estimate
+          type: 'DESTROYED_ARTIFACT',
+          name: "[DESTROYED]",
+          description: "User-patched artifact (Signature 'XX' detected)",
+          confidence: 1.0,
+          isDeleted: true
+       });
+    }
+    // Case 2: Valid Key Node
+    else if (sig === SIG_NK) {
       
       // Basic Validity Check
       const nameLen = view.getUint16(cursor + 0x48, true);
@@ -109,17 +122,18 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
   const parts = query.split(/[\\/]/).filter(p => p.length > 0);
   if (parts.length === 0) return [];
   
-  const targetLeaf = parts[parts.length - 1].toLowerCase(); 
+  const targetLeaf = parts[parts.length - 1]; 
   const queryPath = parts.join('\\').toLowerCase();
 
   // --- PHASE 1: STANDARD STRUCTURED SCAN ---
   const foundOffsets = new Set<number>();
+  const targetLeafLower = targetLeaf.toLowerCase();
 
   let cursor = 0x0;
   while (cursor < len - 8) {
     if (view.getUint16(cursor, true) === SIG_NK) {
       const name = graph.readNodeName(cursor);
-      if (name.toLowerCase().includes(targetLeaf)) {
+      if (name.toLowerCase().includes(targetLeafLower)) {
         foundOffsets.add(cursor);
         
         const resolution = graph.resolvePath(cursor, parts.length + 2);
@@ -154,25 +168,31 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
   }
 
   // --- PHASE 2: RAW STRING SCRAPER (For corrupted/deleted/ghost keys) ---
-  // Convert target leaf to ASCII bytes
-  const asciiPattern: number[] = [];
-  for(let i=0; i<targetLeaf.length; i++) asciiPattern.push(targetLeaf.charCodeAt(i));
+  // Heuristic: Generate TitleCase, LowerCase, UpperCase variants to approximate case-insensitivity
+  const variants = new Set([
+    targetLeaf, 
+    targetLeaf.toLowerCase(), 
+    targetLeaf.toUpperCase(),
+    targetLeaf.charAt(0).toUpperCase() + targetLeaf.slice(1).toLowerCase()
+  ]);
 
-  // Convert target leaf to UTF-16LE bytes (simple latin approximation)
-  const utf16Pattern: number[] = [];
-  for(let i=0; i<targetLeaf.length; i++) {
-    utf16Pattern.push(targetLeaf.charCodeAt(i));
-    utf16Pattern.push(0);
-  }
+  const rawMatches: number[] = [];
 
-  const rawMatches = [
-    ...findBytePattern(data, asciiPattern), 
-    ...findBytePattern(data, utf16Pattern)
-  ];
+  variants.forEach(v => {
+     const ascii: number[] = [];
+     for(let i=0; i<v.length; i++) ascii.push(v.charCodeAt(i));
+     
+     const utf16: number[] = [];
+     for(let i=0; i<v.length; i++) { utf16.push(v.charCodeAt(i)); utf16.push(0); }
 
-  rawMatches.forEach(strOffset => {
-    // A standard 'nk' record has the name at offset 0x4C (76)
-    // We check backwards to see if this string belongs to a node structure
+     rawMatches.push(...findBytePattern(data, ascii));
+     rawMatches.push(...findBytePattern(data, utf16));
+  });
+
+  // Deduplicate
+  const uniqueMatches = Array.from(new Set(rawMatches));
+
+  uniqueMatches.forEach(strOffset => {
     const possibleNodeStart = strOffset - 0x4C;
 
     if (possibleNodeStart >= 0 && !foundOffsets.has(possibleNodeStart)) {
@@ -182,44 +202,51 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
        if (sig === SIG_NK) {
           // Valid node, already processed in Phase 1
        } else if (sig === SIG_DESTROYED) {
-          // Explicitly destroyed by HiveMind. Ignore to prevent re-detection.
-          return; 
+          // Explicitly destroyed by HiveMind. 
+          // Return as DESTROYED_ARTIFACT to confirm to user.
+          findings.push({
+            id: `destroyed-${possibleNodeStart}`,
+            offset: possibleNodeStart,
+            length: 80,
+            type: 'DESTROYED_ARTIFACT',
+            name: `[DESTROYED] ${targetLeaf}`,
+            description: "User-patched artifact.",
+            confidence: 1.0,
+            isDeleted: true
+          });
        } else {
           // Check 2: Signature is corrupted or missing, BUT length matches?
-          // Name Length is at 0x48
           const nameLen = view.getUint16(possibleNodeStart + 0x48, true);
-          
-          // Heuristic: If the length field matches the string length we searched for
-          // It is likely a RECOVERED KEY with a corrupted header.
-          // Note: If nameLen is 0 (which we set on destroy now), this check fails, 
-          // so the item is ignored. Perfect.
+          const flags = view.getUint16(possibleNodeStart + 0x02, true);
           
           let type: ScanFinding['type'] = 'DATA_REMNANT';
           let desc = "Found in unallocated space or deleted record.";
           let confidence = 0.3;
 
-          if (nameLen > 0 && nameLen < 256) {
+          if (nameLen > 0 && nameLen < 256 && flags < 0x100) {
              type = 'RECOVERED_KEY';
              desc = "Header signature corrupted, but structure valid. Likely recoverable.";
              confidence = 0.7;
           }
 
-          findings.push({
-            id: `scrape-${strOffset}`,
-            offset: possibleNodeStart, // Point to where the header SHOULD be
-            length: 0x50 + targetLeaf.length, // Approx
-            type: type,
-            name: `[SCRAPED] ${targetLeaf}`,
-            description: desc,
-            confidence: confidence,
-            inference: {
-              resolvedPath: "FRAGMENTED_DATA",
-              pathConfidence: 0,
-              heuristicWarnings: ["Signature Mismatch (Corrupted Header)", "Recovered via String Scraping"],
-              parentCellIndex: 0,
-              traceSteps: ["Raw string search hit", "Back-trace to header failed or corrupted"]
-            }
-          });
+          if (nameLen > 0) { // Only report if there is SOME structural evidence
+              findings.push({
+                id: `scrape-${strOffset}`,
+                offset: possibleNodeStart, 
+                length: 0x50 + targetLeaf.length, 
+                type: type,
+                name: `[SCRAPED] ${targetLeaf}`,
+                description: desc,
+                confidence: confidence,
+                inference: {
+                  resolvedPath: "FRAGMENTED_DATA",
+                  pathConfidence: 0,
+                  heuristicWarnings: ["Signature Mismatch (Corrupted Header)", "Recovered via String Scraping"],
+                  parentCellIndex: 0,
+                  traceSteps: ["Raw string search hit", "Back-trace to header failed or corrupted"]
+                }
+              });
+          }
        }
     }
   });

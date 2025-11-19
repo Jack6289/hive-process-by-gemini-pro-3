@@ -9,7 +9,7 @@ interface AnalysisPanelProps {
   scanResults: ScanFinding[];
   onSelectFinding: (finding: ScanFinding) => void;
   onDeleteFinding?: (finding: ScanFinding) => void;
-  onDeleteAll?: () => void; // New prop for batch deletion
+  onDeleteAll?: () => void; 
 }
 
 const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ 
@@ -28,7 +28,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
 
   const activeFinding = scanResults.find(f => f.offset === selectionOffset);
-  const hasActiveResults = scanResults.some(f => !f.isDeleted);
+  const hasActiveResults = scanResults.some(f => !f.isDeleted && f.type !== 'DESTROYED_ARTIFACT');
 
   const handleAnalyze = async (mode: AnalysisMode) => {
     if (!selectedBytes || selectedBytes.length === 0) return;
@@ -104,46 +104,47 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                 {scanResults.map((finding) => {
                   const isVerified = finding.confidence >= 0.9;
                   const isPartial = finding.type === 'SEARCH_MATCH' && finding.confidence < 0.9;
+                  const isDestroyed = finding.isDeleted || finding.type === 'DESTROYED_ARTIFACT';
                   
                   return (
                   <div 
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
                     className={`p-3 border-b border-gray-800 cursor-pointer transition-colors group flex flex-col gap-1
-                      ${finding.isDeleted ? 'bg-red-950/30 opacity-60' : 'hover:bg-cyan-900/20'}
-                      ${isVerified && !finding.isDeleted ? 'bg-blue-900/5' : ''}
-                      ${isPartial && !finding.isDeleted ? 'opacity-75' : ''}
-                      ${finding.type === 'RECOVERED_KEY' && !finding.isDeleted ? 'bg-amber-900/10 border-l-2 border-amber-600' : ''}
-                      ${finding.type === 'DATA_REMNANT' && !finding.isDeleted ? 'bg-gray-800/30 border-2 border-dashed border-gray-700 opacity-80' : ''}
+                      ${isDestroyed ? 'bg-gray-900 opacity-60' : 'hover:bg-cyan-900/20'}
+                      ${!isDestroyed && isVerified ? 'bg-blue-900/5' : ''}
+                      ${!isDestroyed && isPartial ? 'opacity-75' : ''}
+                      ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/10 border-l-2 border-amber-600' : ''}
+                      ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-800/30 border-2 border-dashed border-gray-700 opacity-80' : ''}
                     `}
                   >
                     <div className="flex justify-between items-center">
                       <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border
-                        ${finding.isDeleted ? 'bg-gray-800 text-gray-500 border-gray-700 line-through' : ''}
-                        ${!finding.isDeleted && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/30 text-purple-300 border-purple-800' : ''}
-                        ${!finding.isDeleted && finding.type === 'STUBBORN' ? 'bg-red-900/30 text-red-300 border-red-800' : ''}
-                        ${!finding.isDeleted && finding.type === 'HIDDEN' ? 'bg-orange-900/30 text-orange-300 border-orange-800' : ''}
-                        ${!finding.isDeleted && finding.type === 'CORRUPT' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-800' : ''}
-                        ${!finding.isDeleted && finding.type === 'SEARCH_MATCH' && isVerified ? 'bg-blue-900/30 text-blue-300 border-blue-800' : ''}
-                        ${!finding.isDeleted && finding.type === 'SEARCH_MATCH' && isPartial ? 'bg-gray-800/50 text-gray-400 border-gray-700' : ''}
-                        ${!finding.isDeleted && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
-                        ${!finding.isDeleted && finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
+                        ${isDestroyed ? 'bg-gray-800 text-gray-500 border-gray-700 line-through' : ''}
+                        ${!isDestroyed && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/30 text-purple-300 border-purple-800' : ''}
+                        ${!isDestroyed && finding.type === 'STUBBORN' ? 'bg-red-900/30 text-red-300 border-red-800' : ''}
+                        ${!isDestroyed && finding.type === 'HIDDEN' ? 'bg-orange-900/30 text-orange-300 border-orange-800' : ''}
+                        ${!isDestroyed && finding.type === 'CORRUPT' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-800' : ''}
+                        ${!isDestroyed && finding.type === 'SEARCH_MATCH' && isVerified ? 'bg-blue-900/30 text-blue-300 border-blue-800' : ''}
+                        ${!isDestroyed && finding.type === 'SEARCH_MATCH' && isPartial ? 'bg-gray-800/50 text-gray-400 border-gray-700' : ''}
+                        ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
+                        ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
                       `}>
-                        {finding.isDeleted ? 'DESTROYED' : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
+                        {isDestroyed ? 'DESTROYED' : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
                       </span>
                       <span className="text-[9px] font-mono text-gray-500">0x{finding.offset.toString(16).toUpperCase()}</span>
                     </div>
                     
-                    <div className={`text-xs font-bold mt-1 truncate font-mono ${finding.isDeleted ? 'line-through text-gray-500' : 'text-gray-200'}`}>
+                    <div className={`text-xs font-bold mt-1 truncate font-mono ${isDestroyed ? 'line-through text-gray-500' : 'text-gray-200'}`}>
                        {finding.name}
                     </div>
                     
                     {finding.inference ? (
-                      <div className={`mt-1 p-1.5 rounded border ${finding.isDeleted ? 'bg-black/20 border-gray-900 opacity-50' : 'bg-black/40 border-gray-800'}`}>
+                      <div className={`mt-1 p-1.5 rounded border ${isDestroyed ? 'bg-black/20 border-gray-900 opacity-50' : 'bg-black/40 border-gray-800'}`}>
                          <div className="text-[9px] text-gray-400 font-mono truncate mb-1" title={finding.inference.resolvedPath}>
                             <span className="text-cyan-700 mr-1">PATH:</span>{finding.inference.resolvedPath}
                          </div>
-                         {finding.inference.heuristicWarnings.length > 0 && !finding.isDeleted && (
+                         {finding.inference.heuristicWarnings.length > 0 && !isDestroyed && (
                            <div className="text-[9px] text-orange-400">
                              WARN: {finding.inference.heuristicWarnings[0]}
                            </div>
@@ -177,7 +178,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
              <div className="font-mono text-sm text-cyan-300/80 break-all leading-relaxed">
                OFFSET: <span className="text-white">0x{selectionOffset.toString(16).toUpperCase().padStart(8, '0')}</span>
                <div className="mt-3 pt-3 border-t border-gray-800">
-                 {activeFinding && !activeFinding.isDeleted && (isKeyNode || activeFinding.type === 'RECOVERED_KEY') && (
+                 {activeFinding && !activeFinding.isDeleted && activeFinding.type !== 'DESTROYED_ARTIFACT' && (isKeyNode || activeFinding.type === 'RECOVERED_KEY') && (
                     <button
                       onClick={() => onDeleteFinding && onDeleteFinding(activeFinding)}
                       className="w-full py-2 bg-red-900/20 hover:bg-red-900/40 border border-red-900 text-red-400 text-xs font-bold rounded uppercase tracking-wide transition-all flex items-center justify-center gap-2"
@@ -191,7 +192,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                       KEY SIGNATURE DESTROYED (PATCHED)
                     </div>
                  )}
-                 {!isKeyNode && !isAlreadyDeleted && activeFinding?.type !== 'RECOVERED_KEY' && (
+                 {!isKeyNode && !isAlreadyDeleted && activeFinding?.type !== 'RECOVERED_KEY' && activeFinding?.type !== 'DESTROYED_ARTIFACT' && (
                     <div className="text-[10px] text-gray-600 italic text-center">
                       Select a valid 'nk' record to enable binary patch tools.
                     </div>
