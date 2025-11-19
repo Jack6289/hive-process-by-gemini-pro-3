@@ -1,7 +1,6 @@
 
 const SIG_HBIN = 0x6E696268; // 'hbin'
-const BIN_HEADER_SIZE = 0x20;
-const BASE_BLOCK_SIZE = 0x1000;
+const BASE_BLOCK_SIZE = 0x1000; // 4096 bytes header
 
 export interface ReconcileResult {
   patchedBuffer: Uint8Array;
@@ -10,146 +9,132 @@ export interface ReconcileResult {
   logVersion: number;
 }
 
-/**
- * Extracts the primary sequence number from a Registry Hive/Log header.
- * Offset 0x04 (4 bytes).
- */
 export const getLogSequenceNumber = (logData: Uint8Array): number => {
   if (logData.length < 0x10) return 0;
   const view = new DataView(logData.buffer, logData.byteOffset, logData.byteLength);
-  // Check signature 'regf'
-  if (view.getUint32(0, true) !== 0x66676572) return 0;
+  if (view.getUint32(0, true) !== 0x66676572) return 0; // 'regf'
   return view.getUint32(0x04, true);
 };
 
 /**
- * Replays a Transaction Log (.LOG1/2) onto the Main Hive File.
+ * Robust Log Replayer.
+ * Treats the log as a stream of "Dirty Pages" to be stamped onto the main hive.
+ * This mimics the kernel's paging mechanism rather than logical parsing.
+ * 
+ * FIXES CRASHES: Enforces 4KB page alignment to prevent structural corruption.
  */
 export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): ReconcileResult => {
-  // 1. Create a working copy of the main hive
   let buffer = new Uint8Array(mainHive);
   let patches = 0;
-  
-  // Track the furthest byte that contains valid data.
-  // We initialize it to the original size. 
-  // If the log adds data beyond the end, this will increase.
-  let maxWriteOffset = mainHive.length;
-
   const logView = new DataView(logData.buffer, logData.byteOffset, logData.byteLength);
   const logLen = logData.length;
 
-  // Check Log Header (REGF)
-  const sig = logView.getUint32(0, true);
-  if (sig !== 0x66676572) { // 'regf'
-    throw new Error("Invalid Log File Signature");
+  // 1. Validate Header
+  if (logView.getUint32(0, true) !== 0x66676572) {
+    throw new Error("Invalid Log Signature");
   }
-  
-  const logVersion = logView.getUint32(0x14, true); 
+  const logVersion = logView.getUint32(0x14, true);
 
-  // Iterate through the log file looking for 'hbin' records.
-  let cursor = BASE_BLOCK_SIZE; // Skip log header (4096 bytes)
+  // 2. Iterate Log Entries
+  // Valid logs are a sequence of Hive Bins (hbin) starting at 0x1000.
+  let cursor = BASE_BLOCK_SIZE; 
 
   while (cursor < logLen - 32) {
-    const chunkSig = logView.getUint32(cursor, true);
+    const sig = logView.getUint32(cursor, true);
     
-    if (chunkSig === SIG_HBIN) {
-      const offsetRelative = logView.getUint32(cursor + 0x04, true);
-      const size = logView.getUint32(cursor + 0x08, true);
-      
-      if (size === 0) break; // Safety
+    if (sig === SIG_HBIN) {
+      // Read the Dirty Page info
+      const offsetRelative = logView.getUint32(cursor + 0x04, true); // Relative to start of Hive Data (0x1000)
+      const size = logView.getUint32(cursor + 0x08, true); // Size of this dirty block
 
-      // Calculate target physical offset in Main Hive
-      const targetOffset = BASE_BLOCK_SIZE + offsetRelative;
-      const endOffset = targetOffset + size;
-
-      // Update the valid data boundary
-      if (endOffset > maxWriteOffset) {
-        maxWriteOffset = endOffset;
+      // CRITICAL FIX: Page Alignment Enforcement
+      // Real hive blocks in logs are ALWAYS page aligned (4096).
+      // If we see unaligned sizes, it's likely garbage or partial writes. 
+      // Applying these would corrupt the hbin chain and crash Regedit.
+      if (size === 0 || size % 4096 !== 0) {
+          console.warn(`Stopping log replay at unaligned block (Potential Corruption). Offset: 0x${cursor.toString(16)}, Size: ${size}`);
+          break; 
       }
 
-      // Expand buffer if needed to accommodate this patch
+      const targetPhysicalOffset = BASE_BLOCK_SIZE + offsetRelative;
+      const endOffset = targetPhysicalOffset + size;
+
+      // 3. Expand Buffer if needed (Exact Page Alignment)
       if (endOffset > buffer.length) {
-        // Grow strategy: Max of needed size OR current + 4MB (to minimize re-allocations)
-        // We will TRIM the excess zeros at the end function.
-        const newSize = Math.max(endOffset, buffer.length + (4 * 1024 * 1024)); 
+        const newSize = endOffset; // Since size is 4KB aligned, newSize will be too.
         const newBuffer = new Uint8Array(newSize);
         newBuffer.set(buffer);
         buffer = newBuffer;
       }
 
-      // Apply the Patch
-      const patchData = logData.slice(cursor, cursor + size);
-      buffer.set(patchData, targetOffset);
-      
+      // 4. Stamp the Data
+      // We copy specific bytes from Log -> Main
+      const dirtyData = logData.slice(cursor, cursor + size);
+      buffer.set(dirtyData, targetPhysicalOffset);
+
       patches++;
       cursor += size;
     } else {
-      // Skip padding / alignment
-      cursor += 512; 
+      // Garbage Handling:
+      // If we hit non-hbin data, scan ahead to find the next valid bin.
+      // This handles cases where the log has "holes" or sector padding.
+      let foundNext = false;
+      // Scan up to 4KB ahead looking for SIG_HBIN
+      for(let scan = cursor + 4; scan < Math.min(cursor + 4096, logLen - 4); scan += 4) {
+          if (logView.getUint32(scan, true) === SIG_HBIN) {
+              cursor = scan;
+              foundNext = true;
+              break;
+          }
+      }
+      
+      if (!foundNext) {
+          // If we can't find a valid bin nearby, assume end of valid log data.
+          break; 
+      }
     }
   }
 
-  // FINAL TRIM: Cut off the excess pre-allocated zeros.
-  // Windows Registry files must be aligned to 4KB (0x1000).
-  // If we leave trailing zeros beyond the last valid hbin, Regedit stops parsing early.
-  const remainder = maxWriteOffset % 4096;
-  const padding = remainder === 0 ? 0 : 4096 - remainder;
-  const finalSize = maxWriteOffset + padding;
-
-  let finalBuffer = buffer;
-  if (buffer.length !== finalSize) {
-      // If our working buffer is different from the calculated final size, resize it.
-      if (finalSize > buffer.length) {
-          // Grow (Rare case if padding pushes over boundary)
-          const tmp = new Uint8Array(finalSize);
-          tmp.set(buffer);
-          finalBuffer = tmp;
-      } else {
-          // Shrink (Common case: removing the 4MB speculative growth)
-          finalBuffer = buffer.slice(0, finalSize);
-      }
+  // 5. Final Sanity Check: Ensure File Size is Page Aligned
+  if (buffer.length % 4096 !== 0) {
+      const paddingNeeded = 4096 - (buffer.length % 4096);
+      const paddedBuffer = new Uint8Array(buffer.length + paddingNeeded);
+      paddedBuffer.set(buffer);
+      buffer = paddedBuffer;
   }
 
-  const expansion = finalBuffer.length - mainHive.length;
+  const expansion = buffer.length - mainHive.length;
 
   return {
-    patchedBuffer: finalBuffer,
+    patchedBuffer: buffer,
     patchesApplied: patches,
     bytesExpanded: expansion > 0 ? expansion : 0,
     logVersion: logVersion
   };
 };
 
-/**
- * Handles multiple log files (e.g. NTUSER.DAT.LOG1 and LOG2).
- * Sorts them by sequence number and applies them in order.
- */
 export const reconcileMultipleLogs = (mainHive: Uint8Array, logs: Uint8Array[]): ReconcileResult => {
   const mappedLogs = logs.map(log => ({
     data: log,
     seq: getLogSequenceNumber(log)
   }));
 
-  // Sort ascending (Oldest -> Newest)
+  // Sort Oldest -> Newest
   mappedLogs.sort((a, b) => a.seq - b.seq);
 
   let currentBuffer = mainHive;
   let totalPatches = 0;
-  let totalExpansion = 0;
   let finalVersion = 0;
 
   for (const logEntry of mappedLogs) {
     if (logEntry.seq === 0) continue; 
-
     const result = reconcileLog(currentBuffer, logEntry.data);
     currentBuffer = result.patchedBuffer;
     totalPatches += result.patchesApplied;
-    // Precise expansion calculation is done at the very end
     finalVersion = result.logVersion;
   }
-  
-  // Precise expansion calculation
-  totalExpansion = currentBuffer.length - mainHive.length;
+
+  const totalExpansion = currentBuffer.length - mainHive.length;
 
   return {
     patchedBuffer: currentBuffer,
