@@ -1,7 +1,8 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AnalysisMode, AnalysisResult, ScanFinding } from '../types';
 import { analyzeHiveChunk } from '../services/geminiService';
+import { repairKeyNode } from '../services/hiveScanner';
 
 interface AnalysisPanelProps {
   selectedBytes: Uint8Array | null;
@@ -10,6 +11,7 @@ interface AnalysisPanelProps {
   onSelectFinding: (finding: ScanFinding) => void;
   onDeleteFinding?: (finding: ScanFinding) => void;
   onDeleteAll?: () => void; 
+  onPatchBytes?: (offset: number, bytes: Uint8Array) => void;
 }
 
 const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ 
@@ -18,11 +20,25 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   scanResults, 
   onSelectFinding,
   onDeleteFinding,
-  onDeleteAll
+  onDeleteAll,
+  onPatchBytes
 }) => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [activeMode, setActiveMode] = useState<AnalysisMode | null>(null);
+  
+  // Hex Editor State
+  const [editBytes, setEditBytes] = useState<string[]>([]);
+  const [isEditing, setIsEditing] = useState(false);
+
+  useEffect(() => {
+    if (selectedBytes) {
+      setEditBytes(Array.from(selectedBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()));
+      setIsEditing(false);
+    } else {
+      setEditBytes([]);
+    }
+  }, [selectedBytes]);
 
   const isKeyNode = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x6E && selectedBytes[1] === 0x6B;
   const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
@@ -45,6 +61,33 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       console.error(e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleHexChange = (index: number, value: string) => {
+    if (value.length > 2) return;
+    const newBytes = [...editBytes];
+    newBytes[index] = value.toUpperCase();
+    setEditBytes(newBytes);
+    setIsEditing(true);
+  };
+
+  const applyManualPatch = () => {
+    if (!onPatchBytes) return;
+    const byteArray = new Uint8Array(editBytes.map(h => parseInt(h, 16) || 0));
+    onPatchBytes(selectionOffset, byteArray);
+    setIsEditing(false);
+  };
+
+  const applyAutoRepair = () => {
+    if (!selectedBytes || !onPatchBytes) return;
+    
+    // Attempt automatic repair of NK record structure
+    const repaired = repairKeyNode(selectedBytes);
+    if (repaired) {
+      onPatchBytes(selectionOffset, repaired);
+    } else {
+      alert("Could not automatically repair this structure. Try manual patching.");
     }
   };
 
@@ -138,32 +181,13 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                     <div className={`text-xs font-bold mt-1 truncate font-mono ${isDestroyed ? 'line-through text-gray-500' : 'text-gray-200'}`}>
                        {finding.name}
                     </div>
-                    
-                    {finding.inference ? (
-                      <div className={`mt-1 p-1.5 rounded border ${isDestroyed ? 'bg-black/20 border-gray-900 opacity-50' : 'bg-black/40 border-gray-800'}`}>
-                         <div className="text-[9px] text-gray-400 font-mono truncate mb-1" title={finding.inference.resolvedPath}>
-                            <span className="text-cyan-700 mr-1">PATH:</span>{finding.inference.resolvedPath}
-                         </div>
-                         {finding.inference.heuristicWarnings.length > 0 && !isDestroyed && (
-                           <div className="text-[9px] text-orange-400">
-                             WARN: {finding.inference.heuristicWarnings[0]}
-                           </div>
-                         )}
-                         <div className="text-[8px] text-gray-600 uppercase mt-1 flex justify-between">
-                            <span>Confidence: {(finding.inference.pathConfidence * 100).toFixed(0)}%</span>
-                            <span>P-CID: {finding.inference.parentCellIndex}</span>
-                         </div>
-                      </div>
-                    ) : (
-                       <div className="text-[10px] text-gray-500">{finding.description}</div>
-                    )}
                   </div>
                 )})}
              </div>
            </div>
         )}
 
-        {/* Context Box */}
+        {/* Context Box / Hex Editor */}
         <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 shadow-inner">
            <div className="flex justify-between items-end mb-2">
              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Buffer Context</span>
@@ -175,9 +199,47 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
            </div>
            
            {selectedBytes ? (
-             <div className="font-mono text-sm text-cyan-300/80 break-all leading-relaxed">
-               OFFSET: <span className="text-white">0x{selectionOffset.toString(16).toUpperCase().padStart(8, '0')}</span>
-               <div className="mt-3 pt-3 border-t border-gray-800">
+             <div className="font-mono text-sm">
+               <div className="text-cyan-300/80 mb-3 break-all">OFFSET: <span className="text-white">0x{selectionOffset.toString(16).toUpperCase().padStart(8, '0')}</span></div>
+               
+               {/* Hex Grid Editor */}
+               <div className="grid grid-cols-8 gap-1.5 mb-3">
+                  {editBytes.map((byteStr, idx) => (
+                    <input 
+                      key={idx}
+                      type="text"
+                      value={byteStr}
+                      onChange={(e) => handleHexChange(idx, e.target.value)}
+                      className={`w-8 h-6 text-center text-[10px] bg-gray-800 border border-gray-700 rounded focus:border-cyan-500 outline-none
+                        ${isEditing ? 'text-yellow-400' : 'text-gray-300'}
+                      `}
+                      maxLength={2}
+                    />
+                  ))}
+               </div>
+
+               {isEditing && (
+                  <div className="flex gap-2 mb-3">
+                    <button 
+                      onClick={applyManualPatch}
+                      className="flex-1 py-1.5 bg-yellow-900/30 hover:bg-yellow-900/50 border border-yellow-700 text-yellow-400 text-xs font-bold rounded uppercase tracking-wide transition-all"
+                    >
+                      Apply Patch
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setEditBytes(Array.from(selectedBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()));
+                        setIsEditing(false);
+                      }}
+                      className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 text-xs rounded"
+                    >
+                      Reset
+                    </button>
+                  </div>
+               )}
+
+               <div className="pt-3 border-t border-gray-800 space-y-2">
+                 {/* Destroy Button */}
                  {activeFinding && !activeFinding.isDeleted && activeFinding.type !== 'DESTROYED_ARTIFACT' && (isKeyNode || activeFinding.type === 'RECOVERED_KEY') && (
                     <button
                       onClick={() => onDeleteFinding && onDeleteFinding(activeFinding)}
@@ -187,14 +249,21 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                       Destroy / Patch Key Signature
                     </button>
                  )}
+
+                 {/* Auto-Repair Button (Only for NK or Corrupt) */}
+                 {isKeyNode && (
+                    <button
+                      onClick={applyAutoRepair}
+                      className="w-full py-2 bg-green-900/20 hover:bg-green-900/40 border border-green-900 text-green-400 text-xs font-bold rounded uppercase tracking-wide transition-all flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
+                      Auto-Repair NK Header
+                    </button>
+                 )}
+                 
                  {isAlreadyDeleted && (
                     <div className="text-center py-2 bg-gray-800 rounded border border-gray-700 text-gray-400 text-xs font-bold">
                       KEY SIGNATURE DESTROYED (PATCHED)
-                    </div>
-                 )}
-                 {!isKeyNode && !isAlreadyDeleted && activeFinding?.type !== 'RECOVERED_KEY' && activeFinding?.type !== 'DESTROYED_ARTIFACT' && (
-                    <div className="text-[10px] text-gray-600 italic text-center">
-                      Select a valid 'nk' record to enable binary patch tools.
                     </div>
                  )}
                </div>

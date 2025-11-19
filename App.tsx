@@ -133,6 +133,28 @@ const App: React.FC = () => {
     setSelectedBytes(newBuffer.slice(offset, offset + len));
   };
 
+  const handlePatchBytes = (offset: number, bytes: Uint8Array) => {
+    if (!fileData) return;
+    const newBuffer = new Uint8Array(fileData);
+    
+    // Safety check
+    if (offset + bytes.length > newBuffer.length) {
+        alert("Patch exceeds file boundaries.");
+        return;
+    }
+
+    newBuffer.set(bytes, offset);
+    setFileData(newBuffer);
+    
+    // Refresh selection
+    if (selectedBytes) {
+        // We refresh the view from the new buffer
+        const len = selectedBytes.length;
+        const newSelection = newBuffer.slice(selectionOffset, selectionOffset + len);
+        setSelectedBytes(newSelection);
+    }
+  };
+
   const handleDeleteAllFindings = () => {
     if (!fileData) return;
     
@@ -189,7 +211,9 @@ const App: React.FC = () => {
     view.setUint32(0x08, newSeq, true); // Secondary
 
     // 2. Update Header Length (Offset 0x28)
-    view.setUint32(0x28, buffer.length, true);
+    // CRITICAL FIX: This must be (FileSize - HeaderSize(4096)).
+    const dataSize = buffer.length - 0x1000;
+    view.setUint32(0x28, dataSize, true);
 
     // 3. Recalculate Header Checksum (Offset 0x1FC)
     let checksum = 0;
@@ -376,6 +400,7 @@ const App: React.FC = () => {
               onSelectFinding={handleSelectFinding}
               onDeleteFinding={handleDeleteKey}
               onDeleteAll={handleDeleteAllFindings}
+              onPatchBytes={handlePatchBytes}
             />
           </>
         ) : (

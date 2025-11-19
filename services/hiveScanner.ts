@@ -5,6 +5,60 @@ import { HiveGraph } from './inferenceEngine';
 const SIG_NK = 0x6B6E; 
 const SIG_DESTROYED = 0x5858; // 'XX'
 
+// Attempts to calculate the correct name length for a corrupted 'nk' header
+// and returns a patched byte array for the cell.
+export const repairKeyNode = (cellBytes: Uint8Array): Uint8Array | null => {
+  if (cellBytes.length < 0x50) return null;
+  
+  const view = new DataView(cellBytes.buffer, cellBytes.byteOffset, cellBytes.byteLength);
+  
+  // Check Signature (must be nk or maybe we are forcing repair on a suspected one)
+  const sig = view.getUint16(0, true);
+  if (sig !== SIG_NK) return null; // We only repair valid 'nk' signatures
+
+  const flags = view.getUint16(0x02, true);
+  const isCompressed = (flags & 0x20) !== 0; // ASCII
+
+  // Name starts at 0x4C (76).
+  // We need to scan from there to find the real length.
+  let calculatedLen = 0;
+  const maxLen = cellBytes.length - 0x4C; 
+  
+  if (isCompressed) {
+     // ASCII: Scan until null or non-printable
+     for (let i = 0; i < maxLen; i++) {
+        const b = cellBytes[0x4C + i];
+        if (b === 0 || b < 32 || b > 126) break; // Stop at null or control
+        calculatedLen++;
+     }
+  } else {
+     // UTF-16LE: Scan 2 bytes. Stop at 0x0000 or weird control chars.
+     for (let i = 0; i < maxLen; i+=2) {
+        const val = view.getUint16(0x4C + i, true);
+        if (val === 0) break;
+        // Basic heuristic for printable unicode range often seen in registry
+        calculatedLen += 2;
+     }
+  }
+
+  if (calculatedLen === 0) return null;
+
+  // Create patched buffer
+  const patched = new Uint8Array(cellBytes);
+  const patchedView = new DataView(patched.buffer, patched.byteOffset, patched.byteLength);
+
+  // Fix Name Length (0x48)
+  patchedView.setUint16(0x48, calculatedLen, true);
+  
+  // Zero Class Length (0x4A) - usually 0 unless specific class used
+  patchedView.setUint16(0x4A, 0, true);
+
+  // Reset Class Index (0x30) to -1 (FFFFFFFF) if it was pointing to garbage
+  patchedView.setInt32(0x30, -1, true);
+
+  return patched;
+};
+
 export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   const findings: ScanFinding[] = [];
   
