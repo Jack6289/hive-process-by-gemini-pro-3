@@ -1,7 +1,9 @@
+
 import { ScanFinding } from '../types';
 import { HiveGraph } from './inferenceEngine';
 
 const SIG_NK = 0x6B6E; 
+const SIG_DESTROYED = 0x5858; // 'XX'
 
 export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   const findings: ScanFinding[] = [];
@@ -15,8 +17,10 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   let cursor = 0x0; 
   
   while (cursor < len - 8) {
+    const sig = view.getUint16(cursor, true);
+
     // We look for nk signatures anywhere in the data to catch unallocated/slack space too
-    if (view.getUint16(cursor, true) === SIG_NK) {
+    if (sig === SIG_NK) {
       
       // Basic Validity Check
       const nameLen = view.getUint16(cursor + 0x48, true);
@@ -173,30 +177,27 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
 
     if (possibleNodeStart >= 0 && !foundOffsets.has(possibleNodeStart)) {
        
-       // Check 1: Is there a valid NK signature?
        const sig = view.getUint16(possibleNodeStart, true);
        
        if (sig === SIG_NK) {
-          // It is a valid node we somehow missed in Phase 1 (unlikely given logic, but possible if case mismatch)
-          // We'll add it, but usually Phase 1 catches these.
+          // Valid node, already processed in Phase 1
+       } else if (sig === SIG_DESTROYED) {
+          // Explicitly destroyed by HiveMind. Ignore to prevent re-detection.
+          return; 
        } else {
           // Check 2: Signature is corrupted or missing, BUT length matches?
           // Name Length is at 0x48
           const nameLen = view.getUint16(possibleNodeStart + 0x48, true);
           
-          // Heuristic: If the length field matches the string length we searched for (or is reasonable close)
+          // Heuristic: If the length field matches the string length we searched for
           // It is likely a RECOVERED KEY with a corrupted header.
-          // We allow some slack because the scraped string might be a substring of the full name.
+          // Note: If nameLen is 0 (which we set on destroy now), this check fails, 
+          // so the item is ignored. Perfect.
           
-          // Let's just identify it.
           let type: ScanFinding['type'] = 'DATA_REMNANT';
           let desc = "Found in unallocated space or deleted record.";
           let confidence = 0.3;
 
-          // If the length field exactly matches our string length (bytes), it's a strong structural match
-          // Note: targetLeaf length is chars, nameLen is bytes.
-          // We don't know if the match was ASCII or UTF16 easily here without complexity.
-          // Simplified: If nameLen is roughly bounded 
           if (nameLen > 0 && nameLen < 256) {
              type = 'RECOVERED_KEY';
              desc = "Header signature corrupted, but structure valid. Likely recoverable.";

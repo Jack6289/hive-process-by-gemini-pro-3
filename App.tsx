@@ -3,7 +3,7 @@ import React, { useState, useRef } from 'react';
 import HexViewer from './components/HexViewer';
 import AnalysisPanel from './components/AnalysisPanel';
 import { scanHiveForAnomalies, searchHive } from './services/hiveScanner';
-import { reconcileLog, ReconcileResult } from './services/logReconciler';
+import { reconcileMultipleLogs, ReconcileResult } from './services/logReconciler';
 import { ScanFinding } from './types';
 
 const App: React.FC = () => {
@@ -38,35 +38,49 @@ const App: React.FC = () => {
     reader.readAsArrayBuffer(file);
   };
 
-  const handleLogUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !fileData) return;
+  const handleLogUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0 || !fileData) return;
 
     setIsScanning(true);
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      if (event.target?.result) {
-        try {
-          const logBuffer = new Uint8Array(event.target.result as ArrayBuffer);
-          const result = reconcileLog(fileData, logBuffer);
-          
-          setFileData(result.patchedBuffer);
-          setReconcileStats(result);
-          
-          // Auto re-scan after patch
-          setTimeout(() => {
-             const findings = scanHiveForAnomalies(result.patchedBuffer);
-             setScanResults(findings);
-             setIsScanning(false);
-          }, 100);
 
-        } catch (err) {
-          alert("Failed to parse log file. Ensure it is a valid transaction log.");
-          setIsScanning(false);
-        }
-      }
-    };
-    reader.readAsArrayBuffer(file);
+    // Read all selected log files
+    const readers = Array.from(files).map(file => {
+      return new Promise<Uint8Array>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          if (ev.target?.result) {
+            resolve(new Uint8Array(ev.target.result as ArrayBuffer));
+          } else {
+            reject(new Error("Empty file"));
+          }
+        };
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+    });
+
+    try {
+      const logBuffers = await Promise.all(readers);
+      
+      // Process all logs (Sort & Apply)
+      const result = reconcileMultipleLogs(fileData, logBuffers);
+      
+      setFileData(result.patchedBuffer);
+      setReconcileStats(result);
+      
+      // Auto re-scan after patch
+      setTimeout(() => {
+         const findings = scanHiveForAnomalies(result.patchedBuffer);
+         setScanResults(findings);
+         setIsScanning(false);
+      }, 100);
+
+    } catch (err) {
+      console.error(err);
+      alert("Failed to parse log files. Ensure they are valid Registry Transaction Logs.");
+      setIsScanning(false);
+    }
   };
 
   const performScan = () => {
@@ -98,8 +112,16 @@ const App: React.FC = () => {
     const newBuffer = new Uint8Array(fileData); 
     const offset = finding.offset;
     
+    // 1. Destroy Signature (0x6B6E -> 0x5858)
     newBuffer[offset] = 0x58;
     newBuffer[offset + 1] = 0x58;
+
+    // 2. Destroy Name Length (Offset 0x48 -> 0x0000)
+    // This prevents the Raw String Scraper from re-associating the string with this header.
+    if (offset + 0x49 < newBuffer.length) {
+        newBuffer[offset + 0x48] = 0x00;
+        newBuffer[offset + 0x49] = 0x00;
+    }
     
     setFileData(newBuffer);
     
@@ -109,6 +131,43 @@ const App: React.FC = () => {
 
     const len = finding.length;
     setSelectedBytes(newBuffer.slice(offset, offset + len));
+  };
+
+  const handleDeleteAllFindings = () => {
+    if (!fileData || scanResults.length === 0) return;
+    if (!window.confirm(`WARNING: This will permanently corrupt ${scanResults.length} identified keys in the binary structure. Proceed?`)) return;
+
+    const newBuffer = new Uint8Array(fileData);
+    
+    const updatedResults = scanResults.map(f => {
+      if (f.isDeleted) return f; // Skip already deleted
+
+      // Safety check: Ensure we are within bounds
+      if (f.offset + 1 < newBuffer.length) {
+        // 1. Patch 'nk' signature to 'XX'
+        newBuffer[f.offset] = 0x58;
+        newBuffer[f.offset + 1] = 0x58;
+
+        // 2. Zero out Name Length (0x48)
+        if (f.offset + 0x49 < newBuffer.length) {
+           newBuffer[f.offset + 0x48] = 0x00;
+           newBuffer[f.offset + 0x49] = 0x00;
+        }
+
+        return { ...f, isDeleted: true };
+      }
+      return f;
+    });
+
+    setFileData(newBuffer);
+    setScanResults(updatedResults);
+
+    // Refresh selection if active
+    if (selectedBytes && selectionOffset > 0) {
+      // Re-read from new buffer at current selection
+      const len = selectedBytes.length;
+      setSelectedBytes(newBuffer.slice(selectionOffset, selectionOffset + len));
+    }
   };
 
   const handleDownload = () => {
@@ -149,8 +208,6 @@ const App: React.FC = () => {
   };
 
   const loadAdvancedDemoData = () => {
-     // ... (existing demo logic, kept briefly for simplicity)
-     // For now just clear
      setScanResults([]);
      alert("Please load a real file to test Log Reconciliation.");
   };
@@ -190,6 +247,7 @@ const App: React.FC = () => {
 
                <input 
                   type="file" 
+                  multiple
                   ref={logInputRef} 
                   className="hidden" 
                   accept=".log,.log1,.log2"
@@ -198,9 +256,9 @@ const App: React.FC = () => {
                <button
                  onClick={() => logInputRef.current?.click()}
                  className="px-3 py-1.5 text-xs font-bold rounded border bg-purple-900/20 hover:bg-purple-900/40 border-purple-900/50 text-purple-300 uppercase tracking-wide flex items-center gap-2"
-                 title="Load .LOG file to recover recent keys"
+                 title="Load .LOG, .LOG1, .LOG2 files to recover recent keys"
                >
-                 {reconcileStats ? `Log Applied (${reconcileStats.patchesApplied})` : 'Load Transaction Log'}
+                 {reconcileStats ? `Logs Merged (${reconcileStats.patchesApplied} Pgs)` : 'Load Transaction Logs'}
                </button>
 
                <button
@@ -277,6 +335,7 @@ const App: React.FC = () => {
               scanResults={scanResults}
               onSelectFinding={handleSelectFinding}
               onDeleteFinding={handleDeleteKey}
+              onDeleteAll={handleDeleteAllFindings}
             />
           </>
         ) : (

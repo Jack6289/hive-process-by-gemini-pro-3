@@ -1,4 +1,5 @@
-import React, { useMemo, useState, useEffect } from 'react';
+
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 
 interface HexViewerProps {
   data: Uint8Array;
@@ -12,6 +13,7 @@ const PAGE_SIZE = 1024; // View 1KB at a time for performance
 const HexViewer: React.FC<HexViewerProps> = ({ data, baseOffset, onSelectionChange }) => {
   const [page, setPage] = useState(0);
   const [selection, setSelection] = useState<{ start: number | null; end: number | null }>({ start: null, end: null });
+  const prevDataLengthRef = useRef<number>(data.length);
 
   const totalPages = Math.ceil(data.length / PAGE_SIZE);
   const pageData = useMemo(() => {
@@ -98,8 +100,13 @@ const HexViewer: React.FC<HexViewerProps> = ({ data, baseOffset, onSelectionChan
   };
 
   useEffect(() => {
-      setPage(0);
-      setSelection({ start: null, end: null });
+      // Only reset if length changes significantly (e.g. new file loaded)
+      // Patches usually keep length or expand slightly, but user likely wants to keep context.
+      if (data.length !== prevDataLengthRef.current) {
+          setPage(0);
+          setSelection({ start: null, end: null });
+          prevDataLengthRef.current = data.length;
+      }
   }, [data]);
 
   return (

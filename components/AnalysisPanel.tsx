@@ -9,6 +9,7 @@ interface AnalysisPanelProps {
   scanResults: ScanFinding[];
   onSelectFinding: (finding: ScanFinding) => void;
   onDeleteFinding?: (finding: ScanFinding) => void;
+  onDeleteAll?: () => void; // New prop for batch deletion
 }
 
 const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ 
@@ -16,7 +17,8 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   selectionOffset, 
   scanResults, 
   onSelectFinding,
-  onDeleteFinding 
+  onDeleteFinding,
+  onDeleteAll
 }) => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -26,6 +28,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
 
   const activeFinding = scanResults.find(f => f.offset === selectionOffset);
+  const hasActiveResults = scanResults.some(f => !f.isDeleted);
 
   const handleAnalyze = async (mode: AnalysisMode) => {
     if (!selectedBytes || selectedBytes.length === 0) return;
@@ -77,10 +80,26 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
         {/* Automated Scan Results */}
         {scanResults.length > 0 && (
            <div className="space-y-2">
-             <div className="text-[10px] font-bold text-cyan-500 uppercase tracking-widest flex justify-between">
-                <span>Inference Results ({scanResults.length})</span>
-                <span className="animate-pulse">● LIVE</span>
+             <div className="flex items-end justify-between mb-2">
+                <div className="text-[10px] font-bold text-cyan-500 uppercase tracking-widest flex gap-2 items-center">
+                   <span>Inference Results ({scanResults.length})</span>
+                   <span className="animate-pulse text-[8px]">● LIVE</span>
+                </div>
+                {hasActiveResults && onDeleteAll && (
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteAll();
+                    }}
+                    className="bg-red-900/20 hover:bg-red-900/40 active:bg-red-800 text-red-400 border border-red-900/50 text-[9px] font-bold px-2 py-1 rounded uppercase transition-colors flex items-center gap-1"
+                    title="Bulk patch all found keys"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    Destroy All
+                  </button>
+                )}
              </div>
+             
              <div className="max-h-60 overflow-y-auto border border-gray-800 rounded-lg bg-black/20">
                 {scanResults.map((finding) => {
                   const isVerified = finding.confidence >= 0.9;
@@ -92,39 +111,39 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                     onClick={() => onSelectFinding(finding)}
                     className={`p-3 border-b border-gray-800 cursor-pointer transition-colors group flex flex-col gap-1
                       ${finding.isDeleted ? 'bg-red-950/30 opacity-60' : 'hover:bg-cyan-900/20'}
-                      ${isVerified ? 'bg-blue-900/5' : ''}
-                      ${isPartial ? 'opacity-75' : ''}
-                      ${finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/10 border-l-2 border-amber-600' : ''}
-                      ${finding.type === 'DATA_REMNANT' ? 'bg-gray-800/30 border-2 border-dashed border-gray-700 opacity-80' : ''}
+                      ${isVerified && !finding.isDeleted ? 'bg-blue-900/5' : ''}
+                      ${isPartial && !finding.isDeleted ? 'opacity-75' : ''}
+                      ${finding.type === 'RECOVERED_KEY' && !finding.isDeleted ? 'bg-amber-900/10 border-l-2 border-amber-600' : ''}
+                      ${finding.type === 'DATA_REMNANT' && !finding.isDeleted ? 'bg-gray-800/30 border-2 border-dashed border-gray-700 opacity-80' : ''}
                     `}
                   >
                     <div className="flex justify-between items-center">
                       <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border
-                        ${finding.type === 'VIRTUALIZED' ? 'bg-purple-900/30 text-purple-300 border-purple-800' : ''}
-                        ${finding.type === 'STUBBORN' ? 'bg-red-900/30 text-red-300 border-red-800' : ''}
-                        ${finding.type === 'HIDDEN' ? 'bg-orange-900/30 text-orange-300 border-orange-800' : ''}
-                        ${finding.type === 'CORRUPT' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-800' : ''}
-                        ${finding.type === 'SEARCH_MATCH' && isVerified ? 'bg-blue-900/30 text-blue-300 border-blue-800' : ''}
-                        ${finding.type === 'SEARCH_MATCH' && isPartial ? 'bg-gray-800/50 text-gray-400 border-gray-700' : ''}
-                        ${finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
-                        ${finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
-                        ${!['VIRTUALIZED', 'STUBBORN', 'HIDDEN', 'CORRUPT', 'SEARCH_MATCH', 'RECOVERED_KEY', 'DATA_REMNANT'].includes(finding.type) ? 'bg-gray-800 text-gray-300' : ''}
+                        ${finding.isDeleted ? 'bg-gray-800 text-gray-500 border-gray-700 line-through' : ''}
+                        ${!finding.isDeleted && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/30 text-purple-300 border-purple-800' : ''}
+                        ${!finding.isDeleted && finding.type === 'STUBBORN' ? 'bg-red-900/30 text-red-300 border-red-800' : ''}
+                        ${!finding.isDeleted && finding.type === 'HIDDEN' ? 'bg-orange-900/30 text-orange-300 border-orange-800' : ''}
+                        ${!finding.isDeleted && finding.type === 'CORRUPT' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-800' : ''}
+                        ${!finding.isDeleted && finding.type === 'SEARCH_MATCH' && isVerified ? 'bg-blue-900/30 text-blue-300 border-blue-800' : ''}
+                        ${!finding.isDeleted && finding.type === 'SEARCH_MATCH' && isPartial ? 'bg-gray-800/50 text-gray-400 border-gray-700' : ''}
+                        ${!finding.isDeleted && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
+                        ${!finding.isDeleted && finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
                       `}>
-                        {finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type}
+                        {finding.isDeleted ? 'DESTROYED' : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
                       </span>
                       <span className="text-[9px] font-mono text-gray-500">0x{finding.offset.toString(16).toUpperCase()}</span>
                     </div>
                     
-                    <div className={`text-xs font-bold mt-1 truncate font-mono ${finding.isDeleted ? 'line-through' : 'text-gray-200'}`}>
+                    <div className={`text-xs font-bold mt-1 truncate font-mono ${finding.isDeleted ? 'line-through text-gray-500' : 'text-gray-200'}`}>
                        {finding.name}
                     </div>
                     
                     {finding.inference ? (
-                      <div className="mt-1 p-1.5 bg-black/40 rounded border border-gray-800">
+                      <div className={`mt-1 p-1.5 rounded border ${finding.isDeleted ? 'bg-black/20 border-gray-900 opacity-50' : 'bg-black/40 border-gray-800'}`}>
                          <div className="text-[9px] text-gray-400 font-mono truncate mb-1" title={finding.inference.resolvedPath}>
                             <span className="text-cyan-700 mr-1">PATH:</span>{finding.inference.resolvedPath}
                          </div>
-                         {finding.inference.heuristicWarnings.length > 0 && (
+                         {finding.inference.heuristicWarnings.length > 0 && !finding.isDeleted && (
                            <div className="text-[9px] text-orange-400">
                              WARN: {finding.inference.heuristicWarnings[0]}
                            </div>

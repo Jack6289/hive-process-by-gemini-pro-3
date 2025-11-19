@@ -11,8 +11,19 @@ export interface ReconcileResult {
 }
 
 /**
+ * Extracts the primary sequence number from a Registry Hive/Log header.
+ * Offset 0x04 (4 bytes).
+ */
+export const getLogSequenceNumber = (logData: Uint8Array): number => {
+  if (logData.length < 0x10) return 0;
+  const view = new DataView(logData.buffer, logData.byteOffset, logData.byteLength);
+  // Check signature 'regf'
+  if (view.getUint32(0, true) !== 0x66676572) return 0;
+  return view.getUint32(0x04, true);
+};
+
+/**
  * Replays a Transaction Log (.LOG1/2) onto the Main Hive File.
- * This mimics the Windows Kernel's behavior of merging dirty pages into memory.
  */
 export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): ReconcileResult => {
   // 1. Create a working copy of the main hive (we might need to resize it)
@@ -29,13 +40,10 @@ export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): Reconci
     throw new Error("Invalid Log File Signature");
   }
   
-  const logVersion = logView.getUint32(0x14, true); // Sequence number
+  const logVersion = logView.getUint32(0x14, true); // Sequence number from 0x14 (secondary) or 0x4 (primary)
 
   // Iterate through the log file looking for 'hbin' records.
-  // Log files usually contain a Base Block (4k) followed by hbin records.
-  // The hbin records in the log contain the *new content* for specific offsets in the main hive.
-  
-  let cursor = BASE_BLOCK_SIZE; // Skip log header
+  let cursor = BASE_BLOCK_SIZE; // Skip log header (4096 bytes)
 
   while (cursor < logLen - 32) {
     const chunkSig = logView.getUint32(cursor, true);
@@ -57,30 +65,65 @@ export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): Reconci
         const newBuffer = new Uint8Array(newSize);
         newBuffer.set(buffer);
         buffer = newBuffer;
-        expansion = newSize - mainHive.length;
+        expansion += (newSize - mainHive.length);
       }
 
       // Apply the Patch
+      // Log files store dirty pages exactly as they should appear in the main hive
       const patchData = logData.slice(cursor, cursor + size);
       buffer.set(patchData, targetOffset);
       
       patches++;
       cursor += size;
     } else {
-      // If not an hbin, it might be padding or end of data. 
-      // In strict parsing we check structure, heuristic just skips 512 bytes?
-      // Since registry blocks are aligned, we step forward carefully.
+      // Skip padding / alignment
       cursor += 512; 
     }
   }
-
-  // Trim buffer to actual used size if we expanded too much? 
-  // For forensics, keeping slack is fine.
 
   return {
     patchedBuffer: buffer,
     patchesApplied: patches,
     bytesExpanded: expansion,
     logVersion: logVersion
+  };
+};
+
+/**
+ * Handles multiple log files (e.g. NTUSER.DAT.LOG1 and LOG2).
+ * Sorts them by sequence number and applies them in order.
+ */
+export const reconcileMultipleLogs = (mainHive: Uint8Array, logs: Uint8Array[]): ReconcileResult => {
+  // 1. Map logs to include their sequence number
+  const mappedLogs = logs.map(log => ({
+    data: log,
+    seq: getLogSequenceNumber(log)
+  }));
+
+  // 2. Sort ascending (Oldest -> Newest)
+  // This ensures we replay history correctly
+  mappedLogs.sort((a, b) => a.seq - b.seq);
+
+  let currentBuffer = mainHive;
+  let totalPatches = 0;
+  let totalExpansion = 0;
+  let finalVersion = 0;
+
+  // 3. Apply sequentially
+  for (const logEntry of mappedLogs) {
+    if (logEntry.seq === 0) continue; // Skip invalid logs
+
+    const result = reconcileLog(currentBuffer, logEntry.data);
+    currentBuffer = result.patchedBuffer;
+    totalPatches += result.patchesApplied;
+    totalExpansion += result.bytesExpanded;
+    finalVersion = result.logVersion;
+  }
+
+  return {
+    patchedBuffer: currentBuffer,
+    patchesApplied: totalPatches,
+    bytesExpanded: totalExpansion,
+    logVersion: finalVersion
   };
 };
