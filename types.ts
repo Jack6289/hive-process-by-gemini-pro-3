@@ -19,6 +19,8 @@ export interface AnalysisResult {
   technicalDetails: string;
   recommendation: string;
   offsetDetected?: string;
+  autoFixHex?: string; // Hex string for automatic patching
+  generatedScript?: string; // Python/PowerShell script for reconstruction
 }
 
 export interface InferenceInsight {
@@ -33,7 +35,7 @@ export interface ScanFinding {
   id: string;
   offset: number;
   length: number;
-  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT';
+  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_HOOK';
   name: string;
   description: string;
   confidence: number;
@@ -48,5 +50,7 @@ export enum AnalysisMode {
   ACL_CLOAKING = 'ACL_CLOAKING',                 
   PERMISSION_BYPASS = 'PERMISSION_BYPASS',       
   COMPOSITE_LAYERING = 'COMPOSITE_LAYERING',     
-  INTEGRITY_RECOVERY = 'INTEGRITY_RECOVERY'      
+  INTEGRITY_RECOVERY = 'INTEGRITY_RECOVERY',
+  ROOTKIT_HEURISTIC = 'ROOTKIT_HEURISTIC',       // New: v3.0
+  SCRIPT_GENERATION = 'SCRIPT_GENERATION'        // New: v3.0
 }

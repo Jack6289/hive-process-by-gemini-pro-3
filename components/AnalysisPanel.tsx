@@ -41,14 +41,18 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
     if (selectedBytes) {
       setEditBytes(Array.from(selectedBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()));
       setIsEditing(false);
-
-      // Sync Context Inputs
       setOffsetInput(selectionOffset.toString(16).toUpperCase());
       setLengthInput(selectedBytes.length.toString());
     } else {
       setEditBytes([]);
     }
   }, [selectedBytes, selectionOffset]);
+
+  // Reset result when selection changes
+  useEffect(() => {
+    setResult(null);
+    setActiveMode(null);
+  }, [selectionOffset]);
 
   const commitContextChange = () => {
     if (!onContextChange) return;
@@ -62,9 +66,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const isKeyNode = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x6E && selectedBytes[1] === 0x6B;
   const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
 
-  // Fuzzy match: Check if selection is INSIDE a finding, not just at the start
   const activeFinding = scanResults.find(f => selectionOffset >= f.offset && selectionOffset < f.offset + f.length);
-  
   const hasActiveResults = scanResults.some(f => !f.isDeleted && f.type !== 'DESTROYED_ARTIFACT');
 
   const handleAnalyze = async (mode: AnalysisMode) => {
@@ -72,11 +74,20 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
     setActiveMode(mode);
     setLoading(true);
     setResult(null);
+    
     try {
       const hexString = Array.from(selectedBytes)
         .map((b: number) => b.toString(16).padStart(2, '0'))
         .join(' ');
-      const response = await analyzeHiveChunk(hexString, mode, selectionOffset);
+        
+      // Prepare v3.0 Context Info
+      const contextInfo = activeFinding ? {
+          path: activeFinding.inference?.resolvedPath || "Unknown",
+          parentName: "Unknown", // In a real app, we'd query the graph engine
+          flags: 0 // We would parse this from bytes 0x02 in a real scenario
+      } : undefined;
+
+      const response = await analyzeHiveChunk(hexString, mode, selectionOffset, contextInfo);
       setResult(response);
     } catch (e) {
       console.error(e);
@@ -100,10 +111,24 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
     setIsEditing(false);
   };
 
+  const applyAutoHeal = () => {
+    if (!result?.autoFixHex || !onPatchBytes) return;
+    
+    // Convert hex string back to bytes
+    const hex = result.autoFixHex.replace(/\s+/g, '');
+    if (hex.length % 2 !== 0) return;
+    
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+        bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    }
+    
+    onPatchBytes(selectionOffset, bytes);
+    alert("AI Auto-Heal Applied Successfully.");
+  };
+
   const applyAutoRepair = () => {
     if (!selectedBytes || !onPatchBytes) return;
-    
-    // Attempt automatic repair of NK record structure
     const repaired = repairKeyNode(selectedBytes);
     if (repaired) {
       onPatchBytes(selectionOffset, repaired);
@@ -114,7 +139,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
 
   const severityColor = (s: string) => {
     switch(s) {
-      case 'critical': return 'text-red-500 border-red-900 bg-red-950/50';
+      case 'critical': return 'text-red-500 border-red-900 bg-red-950/50 shadow-[0_0_15px_rgba(220,38,38,0.2)]';
       case 'high': return 'text-orange-500 border-orange-900 bg-orange-950/50';
       case 'medium': return 'text-yellow-500 border-yellow-900 bg-yellow-950/50';
       default: return 'text-cyan-500 border-cyan-900 bg-cyan-950/50';
@@ -122,11 +147,13 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   };
 
   const modes = [
+    { id: AnalysisMode.ROOTKIT_HEURISTIC, label: 'Rootkit & Hook Detection', desc: 'Scan for IFEO, AppInit, and hidden driver hooks.', icon: '☣️' },
+    { id: AnalysisMode.SCRIPT_GENERATION, label: 'Generate Repair Script', desc: 'Create Python/PS1 to reconstruct FUBAR hives.', icon: '📜' },
     { id: AnalysisMode.GHOST_VIRTUALIZATION, label: 'Virtualization / Ghost Keys', desc: 'Detect keys existing only in memory/containers.', icon: '👻' },
     { id: AnalysisMode.ACL_CLOAKING, label: 'ACL Cloaking / Hidden', desc: 'Find keys hidden from System/Admins.', icon: '🛡️' },
     { id: AnalysisMode.PERMISSION_BYPASS, label: 'Access Denied / Permission', desc: 'Analyze ownership and bypass checks.', icon: '🚫' },
     { id: AnalysisMode.COMPOSITE_LAYERING, label: 'Composite / Merged Keys', desc: 'Identify dynamic composite views.', icon: '🧩' },
-    { id: AnalysisMode.INTEGRITY_RECOVERY, label: 'Illegal Chars / Corrupt', desc: 'Fix null bytes and broken headers.', icon: '🩹' },
+    { id: AnalysisMode.INTEGRITY_RECOVERY, label: 'Integrity Recovery', desc: 'Fix null bytes and broken headers.', icon: '🩹' },
   ];
 
   return (
@@ -134,290 +161,161 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       <div className="p-5 border-b border-gray-800 bg-gray-900/50">
         <h2 className="text-lg font-bold text-cyan-400 flex items-center gap-2 tracking-wide">
            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-           Binary Forensic Lab <span className="text-[9px] ml-auto text-purple-400 border border-purple-900 bg-purple-950 px-1 rounded">v2.6 SAFE REPLAY</span>
+           AI Engine v3.0 <span className="text-[9px] ml-auto text-red-400 border border-red-900 bg-red-950 px-1 rounded animate-pulse">THREAT_INTEL</span>
         </h2>
-        <p className="text-[10px] text-gray-500 mt-1 font-mono">DETERMINISTIC_ENGINE (NO TRAINING REQ)</p>
+        <p className="text-[10px] text-gray-500 mt-1 font-mono">HEURISTICS + ROOTKIT DETECTION ENABLED</p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6">
         
-        {/* Automated Scan Results */}
+        {/* Scan Results List (Simplified for v3.0 view) */}
         {scanResults.length > 0 && (
            <div className="space-y-2">
              <div className="flex items-end justify-between mb-2">
-                <div className="text-[10px] font-bold text-cyan-500 uppercase tracking-widest flex gap-2 items-center">
-                   <span>Inference Results ({scanResults.length})</span>
-                   <span className="animate-pulse text-[8px]">● LIVE</span>
+                <div className="text-[10px] font-bold text-cyan-500 uppercase tracking-widest">
+                   Active Findings ({scanResults.length})
                 </div>
                 {hasActiveResults && onDeleteAll && (
                   <button 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDeleteAll();
-                    }}
-                    className="bg-red-900/20 hover:bg-red-900/40 active:bg-red-800 text-red-400 border border-red-900/50 text-[9px] font-bold px-2 py-1 rounded uppercase transition-colors flex items-center gap-1"
-                    title="Safe Neuter: Clears content but keeps valid structure"
+                    onClick={(e) => { e.stopPropagation(); onDeleteAll(); }}
+                    className="bg-red-900/20 hover:bg-red-900/40 text-red-400 border border-red-900/50 text-[9px] font-bold px-2 py-1 rounded uppercase"
                   >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                    Neuter All
+                    Neuter All Threats
                   </button>
                 )}
              </div>
-             
-             <div className="max-h-60 overflow-y-auto border border-gray-800 rounded-lg bg-black/20">
-                {scanResults.map((finding) => {
-                  const isVerified = finding.confidence >= 0.9;
-                  const isPartial = finding.type === 'SEARCH_MATCH' && finding.confidence < 0.9;
-                  const isDestroyed = finding.isDeleted || finding.type === 'DESTROYED_ARTIFACT';
-                  const isAllocated = finding.allocationStatus === 'Allocated';
-                  const isActive = activeFinding && activeFinding.id === finding.id;
-                  
-                  return (
+             <div className="max-h-40 overflow-y-auto border border-gray-800 rounded-lg bg-black/20">
+                {scanResults.map((finding) => (
                   <div 
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
-                    className={`p-3 border-b border-gray-800 cursor-pointer transition-colors group flex flex-col gap-1
-                      ${isActive ? 'bg-cyan-900/30 border-l-2 border-cyan-400' : ''}
-                      ${isDestroyed ? 'bg-gray-900/50 opacity-50 grayscale' : 'hover:bg-cyan-900/20'}
-                      ${!isDestroyed && !isActive && isVerified ? 'bg-blue-900/5' : ''}
-                      ${!isDestroyed && isPartial ? 'opacity-75' : ''}
+                    className={`p-2 border-b border-gray-800 cursor-pointer text-[10px] font-mono flex justify-between
+                      ${activeFinding?.id === finding.id ? 'bg-cyan-900/30 text-cyan-300' : 'text-gray-400 hover:bg-gray-900'}
+                      ${finding.isDeleted ? 'line-through opacity-50' : ''}
                     `}
                   >
-                    <div className="flex justify-between items-center">
-                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border
-                        ${isDestroyed ? 'bg-gray-800 text-gray-600 border-gray-700 line-through decoration-gray-500' : ''}
-                        ${!isDestroyed && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/30 text-purple-300 border-purple-800' : ''}
-                        ${!isDestroyed && finding.type === 'STUBBORN' ? 'bg-red-900/30 text-red-300 border-red-800' : ''}
-                        ${!isDestroyed && finding.type === 'HIDDEN' ? 'bg-orange-900/30 text-orange-300 border-orange-800' : ''}
-                        ${!isDestroyed && finding.type === 'CORRUPT' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-800' : ''}
-                        ${!isDestroyed && finding.type === 'SEARCH_MATCH' && isVerified ? 'bg-blue-900/30 text-blue-300 border-blue-800' : ''}
-                        ${!isDestroyed && finding.type === 'SEARCH_MATCH' && isPartial ? 'bg-gray-800/50 text-gray-400 border-gray-700' : ''}
-                        ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
-                        ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
-                      `}>
-                        {isDestroyed ? (finding.type === 'DESTROYED_ARTIFACT' ? 'NEUTERED' : 'NEUTERED') : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
-                      </span>
-                      <span className="text-[9px] font-mono text-gray-500">0x{finding.offset.toString(16).toUpperCase()}</span>
-                    </div>
-                    
-                    <div className={`text-xs font-bold mt-1 truncate font-mono ${isDestroyed ? 'line-through text-gray-600 decoration-gray-600' : 'text-gray-200'}`}>
-                       {finding.name}
-                    </div>
-                    
-                    <div className="flex justify-between items-center mt-1">
-                       {/* Allocation Status Indicator */}
-                       {finding.allocationStatus && finding.allocationStatus !== 'Unknown' && (
-                          <span className={`text-[9px] font-bold px-1 rounded 
-                             ${isAllocated ? 'text-green-400 bg-green-900/20' : 'text-gray-500 bg-gray-800/50'}
-                          `}>
-                             {isAllocated ? 'ALLOCATED (Active)' : 'FREE (Deleted)'}
-                          </span>
-                       )}
-                       
-                       {/* Bin Relative Offset */}
-                       {finding.binRelativeOffset !== undefined && finding.binRelativeOffset >= 0 && (
-                          <span className="text-[8px] text-gray-600 font-mono">
-                             REL: 0x{finding.binRelativeOffset.toString(16).toUpperCase()}
-                          </span>
-                       )}
-                    </div>
-                    
-                    {finding.inference && (
-                      <div className={`mt-1 p-1.5 rounded border ${isDestroyed ? 'bg-black/10 border-gray-900/50 opacity-40' : 'bg-black/40 border-gray-800'}`}>
-                         <div className="text-[9px] text-gray-400 font-mono truncate mb-1" title={finding.inference.resolvedPath}>
-                            <span className="text-cyan-700 mr-1">PATH:</span>{finding.inference.resolvedPath}
-                         </div>
-                         {finding.inference.heuristicWarnings.length > 0 && !isDestroyed && (
-                           <div className="text-[9px] text-orange-400">
-                             WARN: {finding.inference.heuristicWarnings[0]}
-                           </div>
-                         )}
-                         <div className="text-[8px] text-gray-600 uppercase mt-1 flex justify-between">
-                            <span>Confidence: {(finding.inference.pathConfidence * 100).toFixed(0)}%</span>
-                            <span>P-CID: {finding.inference.parentCellIndex}</span>
-                         </div>
-                      </div>
-                    )}
+                    <span className="truncate max-w-[200px]">{finding.name}</span>
+                    <span>{finding.type}</span>
                   </div>
-                )})}
+                ))}
              </div>
            </div>
         )}
 
-        {/* Context Box / Hex Editor */}
+        {/* Hex/Context Editor */}
         <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 shadow-inner">
-           <div className="flex flex-col gap-2 mb-3 border-b border-gray-800 pb-3">
-             <div className="flex justify-between items-center">
-                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Analysis Context</span>
-                <button 
-                  onClick={commitContextChange}
-                  className="px-2 py-1 bg-cyan-900/20 hover:bg-cyan-900/40 border border-cyan-900/50 text-cyan-400 text-[9px] font-bold rounded transition-colors"
-                >
-                  SET CONTEXT
-                </button>
-             </div>
-             
-             <div className="flex gap-2">
-                <div className="flex-1 relative">
-                   <span className="absolute left-2 top-1.5 text-[10px] text-gray-500 font-mono">OFF:0x</span>
-                   <input 
-                     type="text" 
-                     value={offsetInput}
-                     onChange={e => setOffsetInput(e.target.value)}
-                     onKeyDown={e => e.key === 'Enter' && commitContextChange()}
-                     className="w-full bg-black/40 border border-gray-700 rounded py-1 pl-12 pr-2 text-xs text-cyan-300 font-mono outline-none focus:border-cyan-500"
-                   />
-                </div>
-                <div className="w-24 relative">
-                   <span className="absolute right-2 top-1.5 text-[10px] text-gray-500 font-mono">B</span>
-                   <input 
-                     type="number" 
-                     value={lengthInput}
-                     onChange={e => setLengthInput(e.target.value)}
-                     onKeyDown={e => e.key === 'Enter' && commitContextChange()}
-                     className="w-full bg-black/40 border border-gray-700 rounded py-1 pl-2 pr-6 text-xs text-cyan-300 font-mono outline-none focus:border-cyan-500 text-right"
-                   />
-                </div>
+           <div className="flex justify-between items-center mb-3 border-b border-gray-800 pb-2">
+             <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Context & Patching</span>
+             <div className="flex gap-1">
+                <input value={offsetInput} onChange={e=>setOffsetInput(e.target.value)} className="w-16 bg-black/40 border border-gray-700 text-[10px] text-cyan-300 px-1" placeholder="OFF"/>
+                <input value={lengthInput} onChange={e=>setLengthInput(e.target.value)} className="w-10 bg-black/40 border border-gray-700 text-[10px] text-cyan-300 px-1" placeholder="LEN"/>
+                <button onClick={commitContextChange} className="px-2 bg-gray-800 text-[9px] text-gray-400 border border-gray-700 hover:text-cyan-400">GO</button>
              </div>
            </div>
            
            {selectedBytes ? (
-             <div className="font-mono text-sm">
-               {/* Hex Grid Editor */}
-               <div className="grid grid-cols-8 gap-1.5 mb-3">
-                  {editBytes.map((byteStr, idx) => (
+             <div>
+               <div className="grid grid-cols-8 gap-1 mb-3">
+                  {editBytes.slice(0, 32).map((byteStr, idx) => (
                     <input 
                       key={idx}
                       type="text"
                       value={byteStr}
                       onChange={(e) => handleHexChange(idx, e.target.value)}
-                      className={`w-8 h-6 text-center text-[10px] bg-gray-800 border border-gray-700 rounded focus:border-cyan-500 outline-none
-                        ${isEditing ? 'text-yellow-400' : 'text-gray-300'}
+                      className={`w-full text-center text-[9px] bg-gray-800 border border-gray-700 focus:border-cyan-500 outline-none p-0.5 rounded
+                        ${isEditing ? 'text-yellow-400' : 'text-gray-400'}
                       `}
                       maxLength={2}
                     />
                   ))}
+                  {editBytes.length > 32 && <div className="col-span-8 text-center text-[9px] text-gray-600 italic">... {editBytes.length - 32} bytes hidden ...</div>}
                </div>
 
-               {isEditing && (
-                  <div className="flex gap-2 mb-3">
-                    <button 
-                      onClick={applyManualPatch}
-                      className="flex-1 py-1.5 bg-yellow-900/30 hover:bg-yellow-900/50 border border-yellow-700 text-yellow-400 text-xs font-bold rounded uppercase tracking-wide transition-all"
-                    >
-                      Apply Patch
-                    </button>
-                    <button 
-                      onClick={() => {
-                        setEditBytes(Array.from(selectedBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()));
-                        setIsEditing(false);
-                      }}
-                      className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 text-xs rounded"
-                    >
-                      Reset
-                    </button>
-                  </div>
-               )}
-
-               <div className="pt-3 border-t border-gray-800 space-y-2">
-                 {/* Destroy / Neuter Button - ALWAYS SHOW if finding exists in context */}
-                 {activeFinding && !activeFinding.isDeleted && activeFinding.type !== 'DESTROYED_ARTIFACT' && (
-                    <button
-                      onClick={() => onDeleteFinding && onDeleteFinding(activeFinding)}
-                      className="w-full py-2 bg-red-900/20 hover:bg-red-900/40 border border-red-900 text-red-400 text-xs font-bold rounded uppercase tracking-wide transition-all flex items-center justify-center gap-2"
-                      title="Safe Neuter: Zeros out subkeys and values while keeping structure valid."
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                      Safe Neuter / Empty Key
-                    </button>
-                 )}
-
-                 {/* Auto-Repair Button (Only for NK or Corrupt) */}
-                 {isKeyNode && (
-                    <button
-                      onClick={applyAutoRepair}
-                      className="w-full py-2 bg-green-900/20 hover:bg-green-900/40 border border-green-900 text-green-400 text-xs font-bold rounded uppercase tracking-wide transition-all flex items-center justify-center gap-2"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
-                      Auto-Repair NK Header
-                    </button>
-                 )}
-                 
-                 {isAlreadyDeleted && (
-                    <div className="text-center py-2 bg-gray-800 rounded border border-gray-700 text-gray-400 text-xs font-bold">
-                      KEY NEUTERED (CLEARED)
-                    </div>
+               <div className="grid grid-cols-2 gap-2">
+                 {isEditing ? (
+                    <button onClick={applyManualPatch} className="col-span-2 py-2 bg-yellow-900/30 border border-yellow-700 text-yellow-400 text-[10px] font-bold rounded">APPLY MANUAL PATCH</button>
+                 ) : (
+                    <>
+                       <button onClick={() => activeFinding && onDeleteFinding && onDeleteFinding(activeFinding)} className="py-2 bg-red-900/20 border border-red-900/50 text-red-400 text-[10px] font-bold rounded hover:bg-red-900/40">SAFE NEUTER</button>
+                       <button onClick={applyAutoRepair} className="py-2 bg-blue-900/20 border border-blue-900/50 text-blue-400 text-[10px] font-bold rounded hover:bg-blue-900/40">STRUCT REPAIR</button>
+                    </>
                  )}
                </div>
              </div>
            ) : (
-             <div className="text-sm text-gray-600 italic py-2 text-center">
-               Select binary data manually or click an anomaly above.
-             </div>
+             <div className="text-center text-[10px] text-gray-600 py-4">No Data Selected</div>
            )}
         </div>
 
-        {/* Forensic Tools Grid */}
+        {/* v3.0 Intelligence Modules */}
         <div>
-          <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">Forensic Modules</div>
-          <div className="grid grid-cols-1 gap-3">
+          <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">AI Intelligence Modules</div>
+          <div className="grid grid-cols-1 gap-2">
             {modes.map((m) => (
               <button
                 key={m.id}
                 onClick={() => handleAnalyze(m.id)}
                 disabled={!selectedBytes || loading}
-                className={`group relative flex items-center gap-4 p-3 rounded-lg border transition-all duration-200 text-left
-                  ${loading && activeMode === m.id ? 'bg-cyan-900/20 border-cyan-500/50' : ''}
-                  ${!selectedBytes 
-                    ? 'bg-gray-900/50 border-gray-800 text-gray-600 cursor-not-allowed grayscale' 
-                    : 'bg-gray-800 border-gray-700 hover:bg-gray-750 hover:border-cyan-600/50 hover:shadow-[0_0_10px_rgba(6,182,212,0.1)]'}
+                className={`group flex items-center gap-3 p-2.5 rounded border text-left transition-all
+                  ${m.id === AnalysisMode.ROOTKIT_HEURISTIC ? 'border-red-900/30 bg-red-900/10 hover:bg-red-900/20' : 'border-gray-800 bg-gray-800/50 hover:bg-gray-800'}
+                  ${loading && activeMode === m.id ? 'animate-pulse border-cyan-500/50' : ''}
                 `}
               >
-                <div className="text-2xl group-hover:scale-110 transition-transform">{m.icon}</div>
+                <div className="text-xl">{m.icon}</div>
                 <div>
-                   <div className={`text-sm font-bold ${!selectedBytes ? 'text-gray-600' : 'text-gray-200 group-hover:text-cyan-400'}`}>
-                     {m.label}
-                   </div>
-                   <div className="text-[10px] text-gray-500 leading-tight mt-0.5">{m.desc}</div>
+                   <div className={`text-xs font-bold ${m.id === AnalysisMode.ROOTKIT_HEURISTIC ? 'text-red-300' : 'text-gray-300'} group-hover:text-white`}>{m.label}</div>
+                   <div className="text-[9px] text-gray-500">{m.desc}</div>
                 </div>
-                {loading && activeMode === m.id && (
-                  <div className="absolute right-3 top-3">
-                    <svg className="animate-spin h-4 w-4 text-cyan-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                  </div>
-                )}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Results Display */}
+        {/* AI Analysis Result */}
         {result && (
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 border-t border-gray-800 pt-4">
-            <div className={`p-4 rounded-lg border ${severityColor(result.severity)} mb-3 relative overflow-hidden`}>
-               <div className="absolute top-0 right-0 p-2 opacity-10 text-6xl font-black select-none pointer-events-none">!</div>
-               <div className="flex justify-between items-center mb-2 relative z-10">
-                  <h3 className="font-bold text-sm uppercase tracking-wide">{result.title}</h3>
-                  <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded bg-black/30 border border-white/10">{result.severity}</span>
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 pt-2">
+            <div className={`p-4 rounded-lg border ${severityColor(result.severity)} mb-3`}>
+               <div className="flex justify-between items-start mb-2">
+                  <h3 className="font-bold text-xs uppercase">{result.title}</h3>
+                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-black/30">{result.severity}</span>
                </div>
-               <p className="text-xs font-medium opacity-90 leading-relaxed relative z-10">{result.description}</p>
-            </div>
+               <p className="text-[11px] opacity-90 leading-relaxed mb-3">{result.description}</p>
+               
+               {/* Auto-Fix Button (v3.0 Feature) */}
+               {result.autoFixHex && (
+                  <button 
+                    onClick={applyAutoHeal}
+                    className="w-full py-2 bg-cyan-400/10 hover:bg-cyan-400/20 border border-cyan-400/50 text-cyan-300 text-[10px] font-bold rounded uppercase flex items-center justify-center gap-2 mb-2"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                    AI Auto-Heal (Apply Fix)
+                  </button>
+               )}
 
-            <div className="space-y-3">
-               <div className="bg-black/20 p-3 rounded border border-gray-800">
-                 <h4 className="text-[10px] text-gray-500 uppercase tracking-widest mb-2">Deep Inspection</h4>
-                 <p className="text-xs text-cyan-100/80 font-mono leading-relaxed whitespace-pre-wrap">{result.technicalDetails}</p>
-               </div>
+               {/* Generated Script View (v3.0 Feature) */}
+               {result.generatedScript && (
+                  <div className="mt-2">
+                     <div className="text-[9px] font-bold text-gray-500 uppercase mb-1">Generated Reconstruction Script</div>
+                     <textarea 
+                       readOnly 
+                       className="w-full h-24 bg-black/50 border border-gray-700 text-[9px] font-mono text-green-400 p-2 rounded resize-none focus:outline-none"
+                       value={result.generatedScript}
+                     />
+                     <button 
+                       onClick={() => navigator.clipboard.writeText(result.generatedScript || "")}
+                       className="w-full mt-1 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 text-[9px] rounded border border-gray-700"
+                     >
+                       Copy Script to Clipboard
+                     </button>
+                  </div>
+               )}
 
-               <div className="bg-cyan-900/10 p-3 rounded border border-cyan-900/30">
-                 <h4 className="text-[10px] text-cyan-400 uppercase tracking-widest mb-2 flex items-center gap-2">
-                   <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span>
-                   Suggested Remediation
-                 </h4>
-                 <p className="text-xs text-gray-300 leading-relaxed">{result.recommendation}</p>
-               </div>
+               {!result.generatedScript && (
+                 <div className="bg-black/20 p-2 rounded border border-gray-800/50 mt-2">
+                   <h4 className="text-[9px] text-gray-500 uppercase mb-1">Technical Details</h4>
+                   <p className="text-[10px] text-cyan-100/70 font-mono">{result.technicalDetails}</p>
+                 </div>
+               )}
             </div>
           </div>
         )}
