@@ -62,7 +62,9 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const isKeyNode = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x6E && selectedBytes[1] === 0x6B;
   const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
 
-  const activeFinding = scanResults.find(f => f.offset === selectionOffset);
+  // Fuzzy match: Check if selection is INSIDE a finding, not just at the start
+  const activeFinding = scanResults.find(f => selectionOffset >= f.offset && selectionOffset < f.offset + f.length);
+  
   const hasActiveResults = scanResults.some(f => !f.isDeleted && f.type !== 'DESTROYED_ARTIFACT');
 
   const handleAnalyze = async (mode: AnalysisMode) => {
@@ -132,7 +134,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       <div className="p-5 border-b border-gray-800 bg-gray-900/50">
         <h2 className="text-lg font-bold text-cyan-400 flex items-center gap-2 tracking-wide">
            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-           Binary Forensic Lab <span className="text-[9px] ml-auto text-purple-400 border border-purple-900 bg-purple-950 px-1 rounded">v2.4 SAFE REPLAY</span>
+           Binary Forensic Lab <span className="text-[9px] ml-auto text-purple-400 border border-purple-900 bg-purple-950 px-1 rounded">v2.6 SAFE REPLAY</span>
         </h2>
         <p className="text-[10px] text-gray-500 mt-1 font-mono">DETERMINISTIC_ENGINE (NO TRAINING REQ)</p>
       </div>
@@ -154,10 +156,10 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                       onDeleteAll();
                     }}
                     className="bg-red-900/20 hover:bg-red-900/40 active:bg-red-800 text-red-400 border border-red-900/50 text-[9px] font-bold px-2 py-1 rounded uppercase transition-colors flex items-center gap-1"
-                    title="Bulk patch all found keys"
+                    title="Safe Neuter: Clears content but keeps valid structure"
                   >
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                    Destroy All
+                    Neuter All
                   </button>
                 )}
              </div>
@@ -168,18 +170,17 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                   const isPartial = finding.type === 'SEARCH_MATCH' && finding.confidence < 0.9;
                   const isDestroyed = finding.isDeleted || finding.type === 'DESTROYED_ARTIFACT';
                   const isAllocated = finding.allocationStatus === 'Allocated';
+                  const isActive = activeFinding && activeFinding.id === finding.id;
                   
                   return (
                   <div 
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
                     className={`p-3 border-b border-gray-800 cursor-pointer transition-colors group flex flex-col gap-1
+                      ${isActive ? 'bg-cyan-900/30 border-l-2 border-cyan-400' : ''}
                       ${isDestroyed ? 'bg-gray-900/50 opacity-50 grayscale' : 'hover:bg-cyan-900/20'}
-                      ${!isDestroyed && isVerified ? 'bg-blue-900/5' : ''}
+                      ${!isDestroyed && !isActive && isVerified ? 'bg-blue-900/5' : ''}
                       ${!isDestroyed && isPartial ? 'opacity-75' : ''}
-                      ${!isDestroyed && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/10 border-l-2 border-purple-500' : ''}
-                      ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/10 border-l-2 border-amber-600' : ''}
-                      ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-800/30 border-2 border-dashed border-gray-700 opacity-80' : ''}
                     `}
                   >
                     <div className="flex justify-between items-center">
@@ -194,7 +195,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                         ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
                         ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
                       `}>
-                        {isDestroyed ? (finding.type === 'DESTROYED_ARTIFACT' ? 'ARTIFACT DESTROYED' : 'DESTROYED') : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
+                        {isDestroyed ? (finding.type === 'DESTROYED_ARTIFACT' ? 'NEUTERED' : 'NEUTERED') : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
                       </span>
                       <span className="text-[9px] font-mono text-gray-500">0x{finding.offset.toString(16).toUpperCase()}</span>
                     </div>
@@ -319,14 +320,15 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                )}
 
                <div className="pt-3 border-t border-gray-800 space-y-2">
-                 {/* Destroy Button */}
-                 {activeFinding && !activeFinding.isDeleted && activeFinding.type !== 'DESTROYED_ARTIFACT' && (isKeyNode || activeFinding.type === 'RECOVERED_KEY') && (
+                 {/* Destroy / Neuter Button - ALWAYS SHOW if finding exists in context */}
+                 {activeFinding && !activeFinding.isDeleted && activeFinding.type !== 'DESTROYED_ARTIFACT' && (
                     <button
                       onClick={() => onDeleteFinding && onDeleteFinding(activeFinding)}
                       className="w-full py-2 bg-red-900/20 hover:bg-red-900/40 border border-red-900 text-red-400 text-xs font-bold rounded uppercase tracking-wide transition-all flex items-center justify-center gap-2"
+                      title="Safe Neuter: Zeros out subkeys and values while keeping structure valid."
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                      Destroy / Patch Key Signature
+                      Safe Neuter / Empty Key
                     </button>
                  )}
 
@@ -343,7 +345,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                  
                  {isAlreadyDeleted && (
                     <div className="text-center py-2 bg-gray-800 rounded border border-gray-700 text-gray-400 text-xs font-bold">
-                      KEY SIGNATURE DESTROYED (PATCHED)
+                      KEY NEUTERED (CLEARED)
                     </div>
                  )}
                </div>

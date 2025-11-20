@@ -1,5 +1,5 @@
 {
   "name": "HiveMind Forensics",
-  "description": "A specialized Windows Registry Hive binary analyzer powered by Gemini. v2.4 features Safe Physical Log Replay, Structural Auto-Repair, and deep corruption analysis using raw binary graph traversal.",
+  "description": "A specialized Windows Registry Hive binary analyzer powered by Gemini. v2.6 features Safe Physical Log Replay, Structural Auto-Repair, and deep corruption analysis using raw binary graph traversal.",
   "requestFramePermissions": []
 }

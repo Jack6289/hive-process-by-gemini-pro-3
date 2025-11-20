@@ -1,3 +1,4 @@
+
 import React, { useState, useRef } from 'react';
 import HexViewer from './components/HexViewer';
 import AnalysisPanel from './components/AnalysisPanel';
@@ -150,23 +151,47 @@ const App: React.FC = () => {
     onSelectionChange(start, end);
   };
 
+  // Safely "neuters" a key without breaking the tree structure.
+  // Instead of changing the signature (which crashes regedit), we clear subkey/value lists.
+  const neuterKeyNode = (buffer: Uint8Array, offset: number) => {
+      const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      
+      // 1. Keep Signature (nk) and Parent (offset + 0x10) valid to prevent tree corruption.
+      
+      // 2. Zero out Subkeys
+      // 0x14: Num Subkeys (Stable) = 0
+      view.setUint32(offset + 0x14, 0, true);
+      // 0x18: Num Subkeys (Volatile) = 0
+      view.setUint32(offset + 0x18, 0, true);
+      // 0x1C: Offset Subkey List (Stable) = -1 (0xFFFFFFFF)
+      view.setInt32(offset + 0x1C, -1, true);
+      // 0x20: Offset Subkey List (Volatile) = -1
+      view.setInt32(offset + 0x20, -1, true);
+      
+      // 3. Zero out Values
+      // 0x24: Num Values = 0
+      view.setUint32(offset + 0x24, 0, true);
+      // 0x28: Offset Value List = -1
+      view.setInt32(offset + 0x28, -1, true);
+      
+      // 4. Clear Security & Class
+      // 0x2C: Security Cell = -1
+      view.setInt32(offset + 0x2C, -1, true);
+      // 0x30: Class Cell = -1
+      view.setInt32(offset + 0x30, -1, true);
+      
+      // Result: Key exists but is totally empty.
+  };
+
   const handleDeleteKey = (finding: ScanFinding) => {
     if (!fileData) return;
 
     const newBuffer = new Uint8Array(fileData); 
     const offset = finding.offset;
     
-    // 1. Destroy Signature (0x6B6E -> 0x5858)
-    newBuffer[offset] = 0x58;
-    newBuffer[offset + 1] = 0x58;
+    // Use Safer "Neuter" method instead of destruction
+    neuterKeyNode(newBuffer, offset);
 
-    // 2. Destroy Name Length (Offset 0x48 -> 0x0000)
-    // This prevents the Raw String Scraper from re-associating the string with this header.
-    if (offset + 0x49 < newBuffer.length) {
-        newBuffer[offset + 0x48] = 0x00;
-        newBuffer[offset + 0x49] = 0x00;
-    }
-    
     setFileData(newBuffer);
     
     setScanResults(prev => prev.map(f => 
@@ -202,7 +227,7 @@ const App: React.FC = () => {
     const activeCount = scanResults.filter(f => !f.isDeleted).length;
     if (activeCount === 0) return;
 
-    const message = `⚠️ PERMANENT DESTRUCTION WARNING ⚠️\n\nYou are about to corrupt ${activeCount} keys in the memory buffer by overwriting their signatures.\n\nThis action is destructive and cannot be undone once downloaded. Are you sure you want to proceed?`;
+    const message = `⚠️ SAFE NEUTER WARNING ⚠️\n\nYou are about to empty ${activeCount} keys.\n\nThis will clear all subkeys, values, and security descriptors for these keys, making them harmless empty shells. The tree structure will remain valid to prevent Regedit crashes.\n\nProceed?`;
 
     if (!window.confirm(message)) return;
 
@@ -213,16 +238,9 @@ const App: React.FC = () => {
     const updatedResults = scanResults.map(f => {
       if (f.isDeleted) return f; // Already deleted
 
-      // Patch Binary
-      if (f.offset + 1 < newBuffer.length) {
-           // 1. Signature
-           newBuffer[f.offset] = 0x58;
-           newBuffer[f.offset + 1] = 0x58;
-           // 2. Length
-           if (f.offset + 0x49 < newBuffer.length) {
-             newBuffer[f.offset + 0x48] = 0x00;
-             newBuffer[f.offset + 0x49] = 0x00;
-           }
+      // Safe Neuter
+      if (f.offset + 0x34 < newBuffer.length) {
+           neuterKeyNode(newBuffer, f.offset);
            return { ...f, isDeleted: true };
       }
       return f;
@@ -234,65 +252,10 @@ const App: React.FC = () => {
     // 4. Update Results State
     setScanResults(updatedResults);
 
-    // 5. Force refresh of selected bytes to show "XX XX" immediately if looking at a key
+    // 5. Force refresh of selected bytes
     if (selectionRange) {
        onSelectionChange(selectionRange.start, selectionRange.end, newBuffer);
     }
-  };
-
-  // REPAIR ROUTINE: Prevents Regedit crashes by ensuring physical structure integrity.
-  // 1. Walks the bin chain.
-  // 2. If a bin is declared but data is missing (EOF), it PADS the file.
-  // 3. If a bin is corrupt, it TRUNCATES the file.
-  const repairHiveStructure = (buffer: Uint8Array): Uint8Array => {
-    if (buffer.length < 0x1000) return buffer;
-    
-    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    const SIG_HBIN = 0x6E696268;
-    
-    let cursor = 0x1000; // First bin starts at 4096
-    let lastValidEnd = 0x1000;
-
-    while (cursor < buffer.length) {
-      // Ensure we have enough space to read a header (32 bytes)
-      if (cursor + 32 > buffer.length) {
-         console.warn(`Partial header at EOF (0x${cursor.toString(16)}). Truncating.`);
-         break; 
-      }
-
-      const sig = view.getUint32(cursor, true);
-      if (sig !== SIG_HBIN) {
-         // End of valid data or garbage
-         break; 
-      }
-
-      const size = view.getUint32(cursor + 0x08, true);
-      if (size === 0 || size % 4096 !== 0) {
-          console.warn(`Invalid bin size at 0x${cursor.toString(16)}. Truncating.`);
-          break;
-      }
-
-      const binEnd = cursor + size;
-
-      // CRITICAL FIX: If Bin extends beyond current file size, EXTEND file.
-      // This happens if Log Replay header writing worked but data writing was partial.
-      if (binEnd > buffer.length) {
-          console.warn(`Bin at 0x${cursor.toString(16)} extends past EOF. Padding file.`);
-          const padded = new Uint8Array(binEnd);
-          padded.set(buffer);
-          return padded; // Return immediately as this is the new valid end
-      }
-
-      lastValidEnd = binEnd;
-      cursor += size;
-    }
-
-    // If the file has trailing garbage (e.g. zeros that aren't a bin), trim it.
-    if (lastValidEnd < buffer.length) {
-        return buffer.slice(0, lastValidEnd);
-    }
-    
-    return buffer;
   };
 
   // Normalizes the Hive Header to ensure Regedit treats it as a valid, clean file.
@@ -325,26 +288,28 @@ const App: React.FC = () => {
   const handleDownload = () => {
     if (!fileData) return;
     
-    // 1. Repair Structure: Pad incomplete bins, trim garbage
-    const repairedBuffer = repairHiveStructure(fileData);
+    // 1. Structural Protection: Do NOT truncate aggressively.
+    // Previous versions tried to "repair" by cutting off after the last bin, but this
+    // caused valid data to be lost if signatures were imperfect.
+    // Now we only enforce 4KB alignment (padding) which is safe.
     
-    // Calculate exact valid data size for header (Regedit requires this logic)
-    const validDataSize = repairedBuffer.length - 0x1000;
+    let finalBuffer = fileData;
 
-    // 2. Alignment Check (just in case truncate didn't align, though hbins are usually aligned)
+    // 2. Alignment Check 
     // Windows likes 4KB alignment for file mapping.
-    const remainder = repairedBuffer.length % 4096;
-    let finalBuffer = repairedBuffer;
+    const remainder = fileData.length % 4096;
     
     if (remainder !== 0) {
        const padding = 4096 - remainder;
-       const tmp = new Uint8Array(repairedBuffer.length + padding);
-       tmp.set(repairedBuffer);
+       const tmp = new Uint8Array(fileData.length + padding);
+       tmp.set(fileData);
        finalBuffer = tmp;
     }
     
+    const validDataSize = finalBuffer.length - 0x1000;
+
     // 3. Finalize Header (Sequence numbers, Length, Checksum)
-    // IMPORTANT: We must use finalBuffer here, not fileData
+    // This is crucial for Regedit to accept the modified file.
     finalizeHiveHeader(finalBuffer, validDataSize);
 
     const blob = new Blob([finalBuffer], { type: "application/octet-stream" });
@@ -551,11 +516,11 @@ const App: React.FC = () => {
              </div>
              
              <div className="text-center space-y-2">
-               <h3 className="text-2xl font-bold text-gray-200 tracking-tight">HiveMind Forensics v2.4</h3>
+               <h3 className="text-2xl font-bold text-gray-200 tracking-tight">HiveMind Forensics v2.6</h3>
                <p className="text-gray-500 max-w-md mx-auto leading-relaxed">
                  Specialized Registry Hive analyzer with <span className="text-cyan-400">Safe Log Replay</span>.
                  <br/>
-                 Load .LOG files to reconcile memory-only keys and recover latest changes.
+                 Load .LOG files to reconcile memory-only keys and recover recent changes.
                </p>
              </div>
 
@@ -584,7 +549,7 @@ const App: React.FC = () => {
            <span>STATUS: <span className={isScanning ? "text-yellow-500 animate-pulse" : "text-green-600"}>{isScanning ? 'PROCESSING...' : 'READY'}</span></span>
         </div>
         <div className="opacity-50">
-           BUILD 2024.10.7 // v2.4 SAFE REPLAY
+           BUILD 2024.10.28 // v2.6 SAFE REPLAY
         </div>
       </footer>
     </div>
