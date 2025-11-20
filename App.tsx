@@ -296,7 +296,7 @@ const App: React.FC = () => {
   };
 
   // Normalizes the Hive Header to ensure Regedit treats it as a valid, clean file.
-  const finalizeHiveHeader = (buffer: Uint8Array) => {
+  const finalizeHiveHeader = (buffer: Uint8Array, explicitDataSize?: number) => {
     if (buffer.length < 0x200) return;
     const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     
@@ -311,7 +311,7 @@ const App: React.FC = () => {
     // 2. Update Header Length (Offset 0x28)
     // CRITICAL FIX: This must be (FileSize - HeaderSize(4096)).
     // Regedit will fail if this equals FileSize.
-    const dataSize = buffer.length - 0x1000;
+    const dataSize = explicitDataSize !== undefined ? explicitDataSize : (buffer.length - 0x1000);
     view.setUint32(0x28, dataSize, true);
 
     // 3. Recalculate Header Checksum (Offset 0x1FC)
@@ -327,6 +327,9 @@ const App: React.FC = () => {
     
     // 1. Repair Structure: Pad incomplete bins, trim garbage
     const repairedBuffer = repairHiveStructure(fileData);
+    
+    // Calculate exact valid data size for header (Regedit requires this logic)
+    const validDataSize = repairedBuffer.length - 0x1000;
 
     // 2. Alignment Check (just in case truncate didn't align, though hbins are usually aligned)
     // Windows likes 4KB alignment for file mapping.
@@ -342,7 +345,7 @@ const App: React.FC = () => {
     
     // 3. Finalize Header (Sequence numbers, Length, Checksum)
     // IMPORTANT: We must use finalBuffer here, not fileData
-    finalizeHiveHeader(finalBuffer);
+    finalizeHiveHeader(finalBuffer, validDataSize);
 
     const blob = new Blob([finalBuffer], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
@@ -359,7 +362,7 @@ const App: React.FC = () => {
     const buffer = customBuffer || fileData;
     if (!buffer) return;
     
-    const maxLen = 1024; 
+    const maxLen = 8192; // Increased to 8KB for manual analysis context
     const len = end - start + 1;
     
     let actualEnd = end;
@@ -371,6 +374,16 @@ const App: React.FC = () => {
     setSelectedBytes(slice);
     setSelectionOffset(start);
     setSelectionRange({ start, end: actualEnd });
+  };
+
+  const handleContextChange = (offset: number, len: number) => {
+     if (!fileData) return;
+     if (offset < 0 || offset >= fileData.length) return;
+     
+     let end = offset + len - 1;
+     if (end >= fileData.length) end = fileData.length - 1;
+     
+     onSelectionChange(offset, end);
   };
 
   const handleSelectFinding = (finding: ScanFinding) => {
@@ -525,6 +538,7 @@ const App: React.FC = () => {
               onDeleteFinding={handleDeleteKey}
               onDeleteAll={handleDeleteAllFindings}
               onPatchBytes={handlePatchBytes}
+              onContextChange={handleContextChange}
             />
           </>
         ) : (

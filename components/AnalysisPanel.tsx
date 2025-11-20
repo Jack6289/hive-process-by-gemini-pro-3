@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { AnalysisMode, AnalysisResult, ScanFinding } from '../types';
 import { analyzeHiveChunk } from '../services/geminiService';
@@ -11,6 +12,7 @@ interface AnalysisPanelProps {
   onDeleteFinding?: (finding: ScanFinding) => void;
   onDeleteAll?: () => void; 
   onPatchBytes?: (offset: number, bytes: Uint8Array) => void;
+  onContextChange?: (offset: number, length: number) => void;
 }
 
 const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ 
@@ -20,7 +22,8 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   onSelectFinding,
   onDeleteFinding,
   onDeleteAll,
-  onPatchBytes
+  onPatchBytes,
+  onContextChange
 }) => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -30,14 +33,31 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const [editBytes, setEditBytes] = useState<string[]>([]);
   const [isEditing, setIsEditing] = useState(false);
 
+  // Context Input State
+  const [offsetInput, setOffsetInput] = useState('');
+  const [lengthInput, setLengthInput] = useState('');
+
   useEffect(() => {
     if (selectedBytes) {
       setEditBytes(Array.from(selectedBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()));
       setIsEditing(false);
+
+      // Sync Context Inputs
+      setOffsetInput(selectionOffset.toString(16).toUpperCase());
+      setLengthInput(selectedBytes.length.toString());
     } else {
       setEditBytes([]);
     }
-  }, [selectedBytes]);
+  }, [selectedBytes, selectionOffset]);
+
+  const commitContextChange = () => {
+    if (!onContextChange) return;
+    const off = parseInt(offsetInput, 16);
+    const len = parseInt(lengthInput, 10);
+    if (!isNaN(off) && !isNaN(len) && len > 0) {
+      onContextChange(off, len);
+    }
+  };
 
   const isKeyNode = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x6E && selectedBytes[1] === 0x6B;
   const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
@@ -147,6 +167,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                   const isVerified = finding.confidence >= 0.9;
                   const isPartial = finding.type === 'SEARCH_MATCH' && finding.confidence < 0.9;
                   const isDestroyed = finding.isDeleted || finding.type === 'DESTROYED_ARTIFACT';
+                  const isAllocated = finding.allocationStatus === 'Allocated';
                   
                   return (
                   <div 
@@ -182,7 +203,25 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                        {finding.name}
                     </div>
                     
-                    {finding.inference ? (
+                    <div className="flex justify-between items-center mt-1">
+                       {/* Allocation Status Indicator */}
+                       {finding.allocationStatus && finding.allocationStatus !== 'Unknown' && (
+                          <span className={`text-[9px] font-bold px-1 rounded 
+                             ${isAllocated ? 'text-green-400 bg-green-900/20' : 'text-gray-500 bg-gray-800/50'}
+                          `}>
+                             {isAllocated ? 'ALLOCATED (Active)' : 'FREE (Deleted)'}
+                          </span>
+                       )}
+                       
+                       {/* Bin Relative Offset */}
+                       {finding.binRelativeOffset !== undefined && finding.binRelativeOffset >= 0 && (
+                          <span className="text-[8px] text-gray-600 font-mono">
+                             REL: 0x{finding.binRelativeOffset.toString(16).toUpperCase()}
+                          </span>
+                       )}
+                    </div>
+                    
+                    {finding.inference && (
                       <div className={`mt-1 p-1.5 rounded border ${isDestroyed ? 'bg-black/10 border-gray-900/50 opacity-40' : 'bg-black/40 border-gray-800'}`}>
                          <div className="text-[9px] text-gray-400 font-mono truncate mb-1" title={finding.inference.resolvedPath}>
                             <span className="text-cyan-700 mr-1">PATH:</span>{finding.inference.resolvedPath}
@@ -197,8 +236,6 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                             <span>P-CID: {finding.inference.parentCellIndex}</span>
                          </div>
                       </div>
-                    ) : (
-                       <div className="text-[10px] text-gray-500">{finding.description}</div>
                     )}
                   </div>
                 )})}
@@ -208,19 +245,43 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
 
         {/* Context Box / Hex Editor */}
         <div className="bg-gray-900 p-4 rounded-lg border border-gray-800 shadow-inner">
-           <div className="flex justify-between items-end mb-2">
-             <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Buffer Context</span>
-             {selectedBytes && (
-               <span className="text-[10px] font-mono text-cyan-600 bg-cyan-950/30 px-2 py-0.5 rounded border border-cyan-900/50">
-                 {selectedBytes.length} BYTES
-               </span>
-             )}
+           <div className="flex flex-col gap-2 mb-3 border-b border-gray-800 pb-3">
+             <div className="flex justify-between items-center">
+                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Analysis Context</span>
+                <button 
+                  onClick={commitContextChange}
+                  className="px-2 py-1 bg-cyan-900/20 hover:bg-cyan-900/40 border border-cyan-900/50 text-cyan-400 text-[9px] font-bold rounded transition-colors"
+                >
+                  SET CONTEXT
+                </button>
+             </div>
+             
+             <div className="flex gap-2">
+                <div className="flex-1 relative">
+                   <span className="absolute left-2 top-1.5 text-[10px] text-gray-500 font-mono">OFF:0x</span>
+                   <input 
+                     type="text" 
+                     value={offsetInput}
+                     onChange={e => setOffsetInput(e.target.value)}
+                     onKeyDown={e => e.key === 'Enter' && commitContextChange()}
+                     className="w-full bg-black/40 border border-gray-700 rounded py-1 pl-12 pr-2 text-xs text-cyan-300 font-mono outline-none focus:border-cyan-500"
+                   />
+                </div>
+                <div className="w-24 relative">
+                   <span className="absolute right-2 top-1.5 text-[10px] text-gray-500 font-mono">B</span>
+                   <input 
+                     type="number" 
+                     value={lengthInput}
+                     onChange={e => setLengthInput(e.target.value)}
+                     onKeyDown={e => e.key === 'Enter' && commitContextChange()}
+                     className="w-full bg-black/40 border border-gray-700 rounded py-1 pl-2 pr-6 text-xs text-cyan-300 font-mono outline-none focus:border-cyan-500 text-right"
+                   />
+                </div>
+             </div>
            </div>
            
            {selectedBytes ? (
              <div className="font-mono text-sm">
-               <div className="text-cyan-300/80 mb-3 break-all">OFFSET: <span className="text-white">0x{selectionOffset.toString(16).toUpperCase().padStart(8, '0')}</span></div>
-               
                {/* Hex Grid Editor */}
                <div className="grid grid-cols-8 gap-1.5 mb-3">
                   {editBytes.map((byteStr, idx) => (

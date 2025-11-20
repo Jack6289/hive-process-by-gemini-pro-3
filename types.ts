@@ -1,3 +1,4 @@
+
 export enum HiveNodeType {
   ROOT = 'ROOT',
   KEY = 'KEY',
@@ -37,6 +38,8 @@ export interface ScanFinding {
   description: string;
   confidence: number;
   isDeleted?: boolean;
+  allocationStatus?: 'Allocated' | 'Free' | 'Unknown';
+  binRelativeOffset?: number;
   inference?: InferenceInsight;
 }
 

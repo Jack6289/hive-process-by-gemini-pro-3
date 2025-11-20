@@ -4,6 +4,7 @@ import { HiveGraph } from './inferenceEngine';
 
 const SIG_NK = 0x6B6E; 
 const SIG_DESTROYED = 0x5858; // 'XX'
+const SIG_HBIN = 0x6E696268;
 
 // Attempts to calculate the correct name length for a corrupted 'nk' header
 // and returns a patched byte array for the cell.
@@ -59,6 +60,35 @@ export const repairKeyNode = (cellBytes: Uint8Array): Uint8Array | null => {
   return patched;
 };
 
+const getBinRelativeOffset = (data: Uint8Array, absOffset: number): number => {
+  // Walk backwards to find the nearest 'hbin' signature
+  // We assume bins are 4KB aligned usually, or at least nearby.
+  // Scan limit 64KB backwards.
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let cursor = absOffset & ~0xFFF; // Start at page boundary
+  
+  // If page boundary isn't hbin, search backwards page by page
+  for(let i=0; i<16; i++) {
+     if (cursor < 0) break;
+     if (cursor + 4 <= data.length && view.getUint32(cursor, true) === SIG_HBIN) {
+         return absOffset - cursor;
+     }
+     cursor -= 4096;
+  }
+  
+  // Fallback: linear scan backwards if alignment failed (corrupted hive)
+  cursor = absOffset;
+  const limit = Math.max(0, absOffset - 65536);
+  while(cursor >= limit) {
+     if (cursor + 4 <= data.length && view.getUint32(cursor, true) === SIG_HBIN) {
+         return absOffset - cursor;
+     }
+     cursor -= 4; // scan 4 bytes
+  }
+
+  return -1;
+};
+
 export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   const findings: ScanFinding[] = [];
   
@@ -73,6 +103,15 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   while (cursor < len - 8) {
     const sig = view.getUint16(cursor, true);
 
+    // Check Cell Allocation Status (Size at -4)
+    let allocationStatus: 'Allocated' | 'Free' | 'Unknown' = 'Unknown';
+    if (cursor >= 4) {
+       const cellSize = view.getInt32(cursor - 4, true);
+       // Negative size = Allocated (Active)
+       // Positive size = Free (Deleted)
+       allocationStatus = cellSize < 0 ? 'Allocated' : 'Free';
+    }
+
     // Case 1: Explicitly Destroyed Artifact
     if (sig === SIG_DESTROYED) {
        findings.push({
@@ -83,7 +122,9 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
           name: "[DESTROYED]",
           description: "User-patched artifact (Signature 'XX' detected)",
           confidence: 1.0,
-          isDeleted: true
+          isDeleted: true,
+          allocationStatus,
+          binRelativeOffset: getBinRelativeOffset(data, cursor)
        });
     }
     // Case 2: Valid Key Node
@@ -131,6 +172,8 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
             name: name,
             description: desc,
             confidence: 0.85,
+            allocationStatus,
+            binRelativeOffset: getBinRelativeOffset(data, cursor),
             inference: {
               resolvedPath: resolution.path,
               pathConfidence: 1.0,
@@ -187,6 +230,14 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
   while (cursor < len - 8) {
     if (view.getUint16(cursor, true) === SIG_NK) {
       const name = graph.readNodeName(cursor);
+      
+      // Get Allocation Status
+      let allocationStatus: 'Allocated' | 'Free' | 'Unknown' = 'Unknown';
+      if (cursor >= 4) {
+         const cellSize = view.getInt32(cursor - 4, true);
+         allocationStatus = cellSize < 0 ? 'Allocated' : 'Free';
+      }
+
       if (name.toLowerCase().includes(targetLeafLower)) {
         foundOffsets.add(cursor);
         
@@ -208,6 +259,8 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
                 ? "Deep Path Verified" 
                 : `Name Match (Path divergence detected)`,
              confidence: isPathMatch ? 1.0 : 0.5,
+             allocationStatus,
+             binRelativeOffset: getBinRelativeOffset(data, cursor),
              inference: {
                resolvedPath: resolution.path || "UNABLE_TO_RESOLVE",
                pathConfidence: isPathMatch ? 1.0 : 0.0,
@@ -253,11 +306,18 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
        
        const sig = view.getUint16(possibleNodeStart, true);
        
+       // Get Allocation Status (Raw Scraper)
+       let allocationStatus: 'Allocated' | 'Free' | 'Unknown' = 'Unknown';
+       if (possibleNodeStart >= 4) {
+          const cellSize = view.getInt32(possibleNodeStart - 4, true);
+          allocationStatus = cellSize < 0 ? 'Allocated' : 'Free';
+       }
+       
+       const relativeOffset = getBinRelativeOffset(data, possibleNodeStart);
+
        if (sig === SIG_NK) {
           // Valid node, already processed in Phase 1
        } else if (sig === SIG_DESTROYED) {
-          // Explicitly destroyed by HiveMind. 
-          // Return as DESTROYED_ARTIFACT to confirm to user.
           findings.push({
             id: `destroyed-${possibleNodeStart}`,
             offset: possibleNodeStart,
@@ -266,7 +326,9 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
             name: `[DESTROYED] ${targetLeaf}`,
             description: "User-patched artifact.",
             confidence: 1.0,
-            isDeleted: true
+            isDeleted: true,
+            allocationStatus,
+            binRelativeOffset: relativeOffset
           });
        } else {
           // Check 2: Signature is corrupted or missing, BUT length matches?
@@ -292,6 +354,8 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
                 name: `[SCRAPED] ${targetLeaf}`,
                 description: desc,
                 confidence: confidence,
+                allocationStatus,
+                binRelativeOffset: relativeOffset,
                 inference: {
                   resolvedPath: "FRAGMENTED_DATA",
                   pathConfidence: 0,
