@@ -5,14 +5,21 @@ interface HexViewerProps {
   data: Uint8Array;
   baseOffset: number;
   onSelectionChange: (start: number, end: number) => void;
+  selectedStart?: number | null;
+  selectedEnd?: number | null;
 }
 
 const BYTES_PER_ROW = 16;
 const PAGE_SIZE = 1024; // View 1KB at a time for performance
 
-const HexViewer: React.FC<HexViewerProps> = ({ data, baseOffset, onSelectionChange }) => {
+const HexViewer: React.FC<HexViewerProps> = ({ 
+  data, 
+  baseOffset, 
+  onSelectionChange,
+  selectedStart = null,
+  selectedEnd = null
+}) => {
   const [page, setPage] = useState(0);
-  const [selection, setSelection] = useState<{ start: number | null; end: number | null }>({ start: null, end: null });
   const prevDataLengthRef = useRef<number>(data.length);
 
   const totalPages = Math.ceil(data.length / PAGE_SIZE);
@@ -22,20 +29,22 @@ const HexViewer: React.FC<HexViewerProps> = ({ data, baseOffset, onSelectionChan
     return data.slice(start, end);
   }, [data, page]);
 
+  // Automatically jump to the page containing the selection start
+  useEffect(() => {
+    if (selectedStart !== null && selectedStart !== undefined) {
+      const targetPage = Math.floor(selectedStart / PAGE_SIZE);
+      if (targetPage !== page && targetPage >= 0 && targetPage < totalPages) {
+        setPage(targetPage);
+      }
+    }
+  }, [selectedStart, totalPages]);
+
   const handleByteClick = (index: number) => {
     const absoluteIndex = (page * PAGE_SIZE) + index;
     
-    if (selection.start === null || (selection.start !== null && selection.end !== null)) {
-      // New selection
-      setSelection({ start: absoluteIndex, end: absoluteIndex });
-      onSelectionChange(absoluteIndex, absoluteIndex);
-    } else {
-      // Extend selection
-      const newStart = Math.min(selection.start, absoluteIndex);
-      const newEnd = Math.max(selection.start, absoluteIndex);
-      setSelection({ start: newStart, end: newEnd });
-      onSelectionChange(newStart, newEnd);
-    }
+    // Pass selection up to parent. 
+    // Current behavior is single-click selection.
+    onSelectionChange(absoluteIndex, absoluteIndex);
   };
 
   const renderRows = () => {
@@ -51,7 +60,7 @@ const HexViewer: React.FC<HexViewerProps> = ({ data, baseOffset, onSelectionChan
         if (j < rowBytes.length) {
           const byteVal = rowBytes[j];
           const absoluteIndex = (page * PAGE_SIZE) + i + j;
-          const isSelected = selection.start !== null && selection.end !== null && absoluteIndex >= selection.start && absoluteIndex <= selection.end;
+          const isSelected = selectedStart !== null && selectedEnd !== null && absoluteIndex >= selectedStart && absoluteIndex <= selectedEnd;
 
           hexSpans.push(
             <span
@@ -101,10 +110,8 @@ const HexViewer: React.FC<HexViewerProps> = ({ data, baseOffset, onSelectionChan
 
   useEffect(() => {
       // Only reset if length changes significantly (e.g. new file loaded)
-      // Patches usually keep length or expand slightly, but user likely wants to keep context.
       if (data.length !== prevDataLengthRef.current) {
           setPage(0);
-          setSelection({ start: null, end: null });
           prevDataLengthRef.current = data.length;
       }
   }, [data]);

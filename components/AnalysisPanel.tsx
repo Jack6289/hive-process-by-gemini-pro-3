@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { AnalysisMode, AnalysisResult, ScanFinding } from '../types';
 import { analyzeHiveChunk } from '../services/geminiService';
@@ -113,7 +112,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       <div className="p-5 border-b border-gray-800 bg-gray-900/50">
         <h2 className="text-lg font-bold text-cyan-400 flex items-center gap-2 tracking-wide">
            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-           Binary Forensic Lab <span className="text-[9px] ml-auto text-purple-400 border border-purple-900 bg-purple-950 px-1 rounded">v2.2 LOG REPLAY</span>
+           Binary Forensic Lab <span className="text-[9px] ml-auto text-purple-400 border border-purple-900 bg-purple-950 px-1 rounded">v2.4 SAFE REPLAY</span>
         </h2>
         <p className="text-[10px] text-gray-500 mt-1 font-mono">DETERMINISTIC_ENGINE (NO TRAINING REQ)</p>
       </div>
@@ -154,16 +153,17 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
                     className={`p-3 border-b border-gray-800 cursor-pointer transition-colors group flex flex-col gap-1
-                      ${isDestroyed ? 'bg-gray-900 opacity-60' : 'hover:bg-cyan-900/20'}
+                      ${isDestroyed ? 'bg-gray-900/50 opacity-50 grayscale' : 'hover:bg-cyan-900/20'}
                       ${!isDestroyed && isVerified ? 'bg-blue-900/5' : ''}
                       ${!isDestroyed && isPartial ? 'opacity-75' : ''}
+                      ${!isDestroyed && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/10 border-l-2 border-purple-500' : ''}
                       ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/10 border-l-2 border-amber-600' : ''}
                       ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-800/30 border-2 border-dashed border-gray-700 opacity-80' : ''}
                     `}
                   >
                     <div className="flex justify-between items-center">
                       <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border
-                        ${isDestroyed ? 'bg-gray-800 text-gray-500 border-gray-700 line-through' : ''}
+                        ${isDestroyed ? 'bg-gray-800 text-gray-600 border-gray-700 line-through decoration-gray-500' : ''}
                         ${!isDestroyed && finding.type === 'VIRTUALIZED' ? 'bg-purple-900/30 text-purple-300 border-purple-800' : ''}
                         ${!isDestroyed && finding.type === 'STUBBORN' ? 'bg-red-900/30 text-red-300 border-red-800' : ''}
                         ${!isDestroyed && finding.type === 'HIDDEN' ? 'bg-orange-900/30 text-orange-300 border-orange-800' : ''}
@@ -173,14 +173,33 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                         ${!isDestroyed && finding.type === 'RECOVERED_KEY' ? 'bg-amber-900/30 text-amber-300 border-amber-800' : ''}
                         ${!isDestroyed && finding.type === 'DATA_REMNANT' ? 'bg-gray-700 text-gray-400 border-gray-600' : ''}
                       `}>
-                        {isDestroyed ? 'DESTROYED' : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
+                        {isDestroyed ? (finding.type === 'DESTROYED_ARTIFACT' ? 'ARTIFACT DESTROYED' : 'DESTROYED') : (finding.type === 'SEARCH_MATCH' && isPartial ? 'PARTIAL MATCH' : finding.type)}
                       </span>
                       <span className="text-[9px] font-mono text-gray-500">0x{finding.offset.toString(16).toUpperCase()}</span>
                     </div>
                     
-                    <div className={`text-xs font-bold mt-1 truncate font-mono ${isDestroyed ? 'line-through text-gray-500' : 'text-gray-200'}`}>
+                    <div className={`text-xs font-bold mt-1 truncate font-mono ${isDestroyed ? 'line-through text-gray-600 decoration-gray-600' : 'text-gray-200'}`}>
                        {finding.name}
                     </div>
+                    
+                    {finding.inference ? (
+                      <div className={`mt-1 p-1.5 rounded border ${isDestroyed ? 'bg-black/10 border-gray-900/50 opacity-40' : 'bg-black/40 border-gray-800'}`}>
+                         <div className="text-[9px] text-gray-400 font-mono truncate mb-1" title={finding.inference.resolvedPath}>
+                            <span className="text-cyan-700 mr-1">PATH:</span>{finding.inference.resolvedPath}
+                         </div>
+                         {finding.inference.heuristicWarnings.length > 0 && !isDestroyed && (
+                           <div className="text-[9px] text-orange-400">
+                             WARN: {finding.inference.heuristicWarnings[0]}
+                           </div>
+                         )}
+                         <div className="text-[8px] text-gray-600 uppercase mt-1 flex justify-between">
+                            <span>Confidence: {(finding.inference.pathConfidence * 100).toFixed(0)}%</span>
+                            <span>P-CID: {finding.inference.parentCellIndex}</span>
+                         </div>
+                      </div>
+                    ) : (
+                       <div className="text-[10px] text-gray-500">{finding.description}</div>
+                    )}
                   </div>
                 )})}
              </div>

@@ -1,5 +1,5 @@
 {
-  "name": "Copy of HiveMind Forensics",
-  "description": "A specialized Windows Registry Hive binary analyzer powered by Gemini. v2.0 features a Heuristic Inference Engine for solving complex registry structures, virtualized key paths, and deep corruption analysis using raw binary graph traversal.",
+  "name": "HiveMind Forensics",
+  "description": "A specialized Windows Registry Hive binary analyzer powered by Gemini. v2.4 features Safe Physical Log Replay, Structural Auto-Repair, and deep corruption analysis using raw binary graph traversal.",
   "requestFramePermissions": []
 }

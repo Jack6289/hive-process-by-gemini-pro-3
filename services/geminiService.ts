@@ -16,6 +16,7 @@ You are an expert in the following structures:
 
 Your job is to solve specific obfuscation and corruption problems provided by the user. 
 Always output valid JSON.
+IMPORTANT: You must strictly escape backslashes in Windows paths. For example, use "C:\\\\Windows" instead of "C:\\Windows".
 `;
 
 export const analyzeHiveChunk = async (
@@ -102,18 +103,40 @@ export const analyzeHiveChunk = async (
       }
     });
 
-    const text = response.text;
+    let text = response.text;
     if (!text) throw new Error("No response from AI");
     
-    return JSON.parse(text) as AnalysisResult;
+    // Cleanup: Remove Markdown code blocks if present
+    text = text.replace(/^```json\s*/g, "").replace(/\s*```$/g, "").trim();
+
+    try {
+      return JSON.parse(text) as AnalysisResult;
+    } catch (e) {
+      console.warn("First JSON parse attempt failed. Trying to fix bad escapes...", e);
+      // Heuristic Fix: Double-escape backslashes that are NOT valid escape sequences
+      // This looks for a backslash followed by a char that isn't ", \, /, b, f, n, r, t, u
+      const fixedText = text.replace(/\\(?![/\\bfnrtu"])/g, "\\\\");
+      try {
+         return JSON.parse(fixedText) as AnalysisResult;
+      } catch (e2) {
+         console.error("Gemini JSON Parsing Failed. Raw text:", text);
+         return {
+            title: "Analysis Parsing Error",
+            description: "The AI model returned invalid JSON data that could not be repaired.",
+            severity: "low",
+            technicalDetails: `JSON Error: ${(e2 as Error).message}. Raw Output snippet: ${text.substring(0, 50)}...`,
+            recommendation: "Try selecting a smaller chunk of data or a valid record boundary."
+         };
+      }
+    }
   } catch (error) {
-    console.error("Gemini Analysis Error:", error);
+    console.error("Gemini Analysis Network Error:", error);
     return {
       title: "Analysis Failed",
       description: "The AI model could not process this binary chunk.",
       severity: "low",
       technicalDetails: String(error),
-      recommendation: "Try selecting a valid 'nk' or 'sk' record boundary (usually starts with 0x6E6B or 0x736B)."
+      recommendation: "Check your network connection or API key."
     };
   }
 };

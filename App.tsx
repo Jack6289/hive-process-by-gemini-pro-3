@@ -1,4 +1,3 @@
-
 import React, { useState, useRef } from 'react';
 import HexViewer from './components/HexViewer';
 import AnalysisPanel from './components/AnalysisPanel';
@@ -15,7 +14,11 @@ const App: React.FC = () => {
   const [scanResults, setScanResults] = useState<ScanFinding[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [jumpQuery, setJumpQuery] = useState('');
   const [reconcileStats, setReconcileStats] = useState<ReconcileResult | null>(null);
+  
+  // Selection State
+  const [selectionRange, setSelectionRange] = useState<{start: number, end: number} | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logInputRef = useRef<HTMLInputElement>(null);
@@ -33,6 +36,8 @@ const App: React.FC = () => {
         setFileName(file.name);
         setScanResults([]); 
         setReconcileStats(null);
+        setSelectionRange(null);
+        setSelectedBytes(null);
       }
     };
     reader.readAsArrayBuffer(file);
@@ -106,6 +111,45 @@ const App: React.FC = () => {
     }, 50);
   };
 
+  const handleJump = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fileData || !jumpQuery.trim()) return;
+
+    // Parse input (handle 0x prefix or pure decimal)
+    let offset = NaN;
+    if (jumpQuery.trim().toLowerCase().startsWith('0x')) {
+       offset = parseInt(jumpQuery.trim(), 16);
+    } else {
+       offset = parseInt(jumpQuery.trim(), 10);
+       // Fallback: if user typed hex without 0x but it failed decimal or looks hex
+       if (isNaN(offset) && /^[0-9A-Fa-f]+$/.test(jumpQuery.trim())) {
+          offset = parseInt(jumpQuery.trim(), 16);
+       }
+    }
+
+    if (isNaN(offset) || offset < 0 || offset >= fileData.length) {
+       alert("Invalid or out of bounds offset.");
+       return;
+    }
+
+    // Check if this offset is part of a known finding to select the whole thing
+    const finding = scanResults.find(f => offset >= f.offset && offset < f.offset + f.length);
+    
+    let start = offset;
+    let end = offset; // Default single byte
+    
+    if (finding) {
+      start = finding.offset;
+      end = finding.offset + finding.length - 1;
+    } else {
+      // Default to 16 bytes view if not a specific finding
+      end = Math.min(offset + 15, fileData.length - 1);
+    }
+
+    // Update Selection
+    onSelectionChange(start, end);
+  };
+
   const handleDeleteKey = (finding: ScanFinding) => {
     if (!fileData) return;
 
@@ -130,7 +174,7 @@ const App: React.FC = () => {
     ));
 
     const len = finding.length;
-    setSelectedBytes(newBuffer.slice(offset, offset + len));
+    onSelectionChange(offset, offset + len - 1, newBuffer);
   };
 
   const handlePatchBytes = (offset: number, bytes: Uint8Array) => {
@@ -146,12 +190,9 @@ const App: React.FC = () => {
     newBuffer.set(bytes, offset);
     setFileData(newBuffer);
     
-    // Refresh selection
-    if (selectedBytes) {
-        // We refresh the view from the new buffer
-        const len = selectedBytes.length;
-        const newSelection = newBuffer.slice(selectionOffset, selectionOffset + len);
-        setSelectedBytes(newSelection);
+    // Refresh selection from new buffer
+    if (selectionRange) {
+        onSelectionChange(selectionRange.start, selectionRange.end, newBuffer);
     }
   };
 
@@ -161,17 +202,19 @@ const App: React.FC = () => {
     const activeCount = scanResults.filter(f => !f.isDeleted).length;
     if (activeCount === 0) return;
 
-    if (!window.confirm(`WARNING: This will permanently corrupt ${activeCount} keys. Proceed?`)) return;
+    const message = `⚠️ PERMANENT DESTRUCTION WARNING ⚠️\n\nYou are about to corrupt ${activeCount} keys in the memory buffer by overwriting their signatures.\n\nThis action is destructive and cannot be undone once downloaded. Are you sure you want to proceed?`;
 
-    // Create a SINGLE copy of the buffer for all patches
+    if (!window.confirm(message)) return;
+
+    // 1. Create a SINGLE copy of the buffer for all patches
     const newBuffer = new Uint8Array(fileData);
     
-    setScanResults(prevResults => {
-      return prevResults.map(f => {
-        if (f.isDeleted) return f; // Already deleted
+    // 2. SYNCHRONOUSLY Patch Binary & Update Results List
+    const updatedResults = scanResults.map(f => {
+      if (f.isDeleted) return f; // Already deleted
 
-        // Patch Binary
-        if (f.offset + 1 < newBuffer.length) {
+      // Patch Binary
+      if (f.offset + 1 < newBuffer.length) {
            // 1. Signature
            newBuffer[f.offset] = 0x58;
            newBuffer[f.offset + 1] = 0x58;
@@ -181,20 +224,75 @@ const App: React.FC = () => {
              newBuffer[f.offset + 0x49] = 0x00;
            }
            return { ...f, isDeleted: true };
-        }
-        return f;
-      });
+      }
+      return f;
     });
 
-    // Update Binary State ONCE
+    // 3. Update Binary State ONCE
     setFileData(newBuffer);
+    
+    // 4. Update Results State
+    setScanResults(updatedResults);
 
-    // Force refresh of selected bytes to show "XX XX" immediately if looking at a key
-    if (selectedBytes && selectionOffset >= 0) {
-      const len = selectedBytes.length;
-      const newSelection = newBuffer.slice(selectionOffset, selectionOffset + len);
-      setSelectedBytes(newSelection);
+    // 5. Force refresh of selected bytes to show "XX XX" immediately if looking at a key
+    if (selectionRange) {
+       onSelectionChange(selectionRange.start, selectionRange.end, newBuffer);
     }
+  };
+
+  // REPAIR ROUTINE: Prevents Regedit crashes by ensuring physical structure integrity.
+  // 1. Walks the bin chain.
+  // 2. If a bin is declared but data is missing (EOF), it PADS the file.
+  // 3. If a bin is corrupt, it TRUNCATES the file.
+  const repairHiveStructure = (buffer: Uint8Array): Uint8Array => {
+    if (buffer.length < 0x1000) return buffer;
+    
+    const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+    const SIG_HBIN = 0x6E696268;
+    
+    let cursor = 0x1000; // First bin starts at 4096
+    let lastValidEnd = 0x1000;
+
+    while (cursor < buffer.length) {
+      // Ensure we have enough space to read a header (32 bytes)
+      if (cursor + 32 > buffer.length) {
+         console.warn(`Partial header at EOF (0x${cursor.toString(16)}). Truncating.`);
+         break; 
+      }
+
+      const sig = view.getUint32(cursor, true);
+      if (sig !== SIG_HBIN) {
+         // End of valid data or garbage
+         break; 
+      }
+
+      const size = view.getUint32(cursor + 0x08, true);
+      if (size === 0 || size % 4096 !== 0) {
+          console.warn(`Invalid bin size at 0x${cursor.toString(16)}. Truncating.`);
+          break;
+      }
+
+      const binEnd = cursor + size;
+
+      // CRITICAL FIX: If Bin extends beyond current file size, EXTEND file.
+      // This happens if Log Replay header writing worked but data writing was partial.
+      if (binEnd > buffer.length) {
+          console.warn(`Bin at 0x${cursor.toString(16)} extends past EOF. Padding file.`);
+          const padded = new Uint8Array(binEnd);
+          padded.set(buffer);
+          return padded; // Return immediately as this is the new valid end
+      }
+
+      lastValidEnd = binEnd;
+      cursor += size;
+    }
+
+    // If the file has trailing garbage (e.g. zeros that aren't a bin), trim it.
+    if (lastValidEnd < buffer.length) {
+        return buffer.slice(0, lastValidEnd);
+    }
+    
+    return buffer;
   };
 
   // Normalizes the Hive Header to ensure Regedit treats it as a valid, clean file.
@@ -212,6 +310,7 @@ const App: React.FC = () => {
 
     // 2. Update Header Length (Offset 0x28)
     // CRITICAL FIX: This must be (FileSize - HeaderSize(4096)).
+    // Regedit will fail if this equals FileSize.
     const dataSize = buffer.length - 0x1000;
     view.setUint32(0x28, dataSize, true);
 
@@ -226,17 +325,26 @@ const App: React.FC = () => {
   const handleDownload = () => {
     if (!fileData) return;
     
-    // FIX: Ensure 4KB Alignment (Padding) for Regedit compatibility
-    const remainder = fileData.length % 4096;
-    const padding = remainder === 0 ? 0 : 4096 - remainder;
-    const totalSize = fileData.length + padding;
+    // 1. Repair Structure: Pad incomplete bins, trim garbage
+    const repairedBuffer = repairHiveStructure(fileData);
 
-    const outputBuffer = new Uint8Array(totalSize);
-    outputBuffer.set(fileData);
+    // 2. Alignment Check (just in case truncate didn't align, though hbins are usually aligned)
+    // Windows likes 4KB alignment for file mapping.
+    const remainder = repairedBuffer.length % 4096;
+    let finalBuffer = repairedBuffer;
     
-    finalizeHiveHeader(outputBuffer);
+    if (remainder !== 0) {
+       const padding = 4096 - remainder;
+       const tmp = new Uint8Array(repairedBuffer.length + padding);
+       tmp.set(repairedBuffer);
+       finalBuffer = tmp;
+    }
+    
+    // 3. Finalize Header (Sequence numbers, Length, Checksum)
+    // IMPORTANT: We must use finalBuffer here, not fileData
+    finalizeHiveHeader(finalBuffer);
 
-    const blob = new Blob([outputBuffer], { type: "application/octet-stream" });
+    const blob = new Blob([finalBuffer], { type: "application/octet-stream" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -247,8 +355,10 @@ const App: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const onSelectionChange = (start: number, end: number) => {
-    if (!fileData) return;
+  const onSelectionChange = (start: number, end: number, customBuffer?: Uint8Array) => {
+    const buffer = customBuffer || fileData;
+    if (!buffer) return;
+    
     const maxLen = 1024; 
     const len = end - start + 1;
     
@@ -257,18 +367,17 @@ const App: React.FC = () => {
         actualEnd = start + maxLen - 1;
     }
 
-    const slice = fileData.slice(start, actualEnd + 1);
+    const slice = buffer.slice(start, actualEnd + 1);
     setSelectedBytes(slice);
     setSelectionOffset(start);
+    setSelectionRange({ start, end: actualEnd });
   };
 
   const handleSelectFinding = (finding: ScanFinding) => {
     if (!fileData) return;
     const start = finding.offset;
-    const end = finding.offset + finding.length;
-    const slice = fileData.slice(start, end);
-    setSelectedBytes(slice);
-    setSelectionOffset(start);
+    const end = finding.offset + finding.length - 1;
+    onSelectionChange(start, end);
   };
 
   const loadAdvancedDemoData = () => {
@@ -304,6 +413,19 @@ const App: React.FC = () => {
                  />
                  <button type="submit" className="px-2 py-1.5 bg-gray-800 text-gray-400 hover:text-cyan-400 border-l border-gray-700">
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                 </button>
+               </form>
+
+               <form onSubmit={handleJump} className="flex items-center bg-gray-900 rounded border border-gray-700 overflow-hidden focus-within:border-cyan-600 transition-colors">
+                 <input 
+                    type="text" 
+                    value={jumpQuery}
+                    onChange={(e) => setJumpQuery(e.target.value)}
+                    placeholder="Jump to 0x..." 
+                    className="bg-transparent text-xs text-gray-200 px-3 py-1.5 outline-none w-24 font-mono"
+                 />
+                 <button type="submit" className="px-2 py-1.5 bg-gray-800 text-gray-400 hover:text-cyan-400 border-l border-gray-700" title="Jump to Byte Offset">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 9l3 3m0 0l-3 3m3-3H8m13 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
                  </button>
                </form>
 
@@ -390,6 +512,8 @@ const App: React.FC = () => {
                      data={fileData} 
                      baseOffset={0}
                      onSelectionChange={onSelectionChange}
+                     selectedStart={selectionRange?.start ?? null}
+                     selectedEnd={selectionRange?.end ?? null}
                    />
                 </div>
             </div>
@@ -413,9 +537,9 @@ const App: React.FC = () => {
              </div>
              
              <div className="text-center space-y-2">
-               <h3 className="text-2xl font-bold text-gray-200 tracking-tight">HiveMind Forensics v2.2</h3>
+               <h3 className="text-2xl font-bold text-gray-200 tracking-tight">HiveMind Forensics v2.4</h3>
                <p className="text-gray-500 max-w-md mx-auto leading-relaxed">
-                 Specialized Registry Hive analyzer with <span className="text-cyan-400">Transaction Log Replay</span>.
+                 Specialized Registry Hive analyzer with <span className="text-cyan-400">Safe Log Replay</span>.
                  <br/>
                  Load .LOG files to reconcile memory-only keys and recover latest changes.
                </p>
@@ -446,7 +570,7 @@ const App: React.FC = () => {
            <span>STATUS: <span className={isScanning ? "text-yellow-500 animate-pulse" : "text-green-600"}>{isScanning ? 'PROCESSING...' : 'READY'}</span></span>
         </div>
         <div className="opacity-50">
-           BUILD 2024.10.5 // v2.2 LOG RECONCILIATION
+           BUILD 2024.10.7 // v2.4 SAFE REPLAY
         </div>
       </footer>
     </div>
