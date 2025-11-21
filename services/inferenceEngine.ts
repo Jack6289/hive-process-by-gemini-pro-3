@@ -1,3 +1,4 @@
+
 import { ScanFinding } from '../types';
 
 const SIG_HBIN = 0x6E696268; // 'hbin'
@@ -29,8 +30,6 @@ export class HiveGraph {
       // Check for hbin signature
       const sig = this.view.getUint32(cursor, true);
       if (sig !== SIG_HBIN) {
-        // If not hbin, maybe we just skip? In corrupted files, this might fail.
-        // For now, we assume standard structure or stop.
         break; 
       }
 
@@ -43,28 +42,112 @@ export class HiveGraph {
         size: size
       });
 
-      if (size === 0) break; // Prevent infinite loop on corruption
+      if (size === 0) break; 
       cursor += size;
     }
+
+    // Optimization: Sort bin map by logical start to enable Binary Search
+    this.binMap.sort((a, b) => a.logicalStart - b.logicalStart);
   }
 
   public resolveCellOffset(cellIndex: number): number | null {
-    // Find the bin containing this cell index
-    // Cell Index is relative to the start of the first bin's data area
-    const bin = this.binMap.find(b => cellIndex >= b.logicalStart && cellIndex < b.logicalStart + b.size);
-    
-    if (!bin) return null;
+    // OPTIMIZATION: Binary Search O(log N) instead of Linear Scan O(N)
+    // This prevents freezing on large hives (e.g. SOFTWARE hive with 25k+ bins)
+    let low = 0;
+    let high = this.binMap.length - 1;
 
-    // Physical = BinStart + Header(0x20) + (CellIndex - BinLogicalStart)
-    // Note: size includes header. logicalStart is the offset of this bin relative to registry start?
-    // Actually, cell index is usually just offset relative to start of hive bins (0x1000).
-    // But in multi-bin files, the bins might not be contiguous in memory if mapped, but in file they are.
-    // The standard calc:
-    const offset = bin.physicalOffset + 0x20 + (cellIndex - bin.logicalStart);
-    
-    // Bounds check
-    if (offset >= this.data.length) return null;
-    return offset;
+    while (low <= high) {
+      const mid = (low + high) >>> 1; // Unsigned right shift
+      const bin = this.binMap[mid];
+      
+      if (cellIndex >= bin.logicalStart && cellIndex < bin.logicalStart + bin.size) {
+         const offset = bin.physicalOffset + 0x20 + (cellIndex - bin.logicalStart);
+         return offset < this.data.length ? offset : null;
+      }
+      
+      if (cellIndex < bin.logicalStart) {
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return null;
+  }
+
+  // v3.1: Build a set of all offsets reachable from the Root Key.
+  // Any KeyNode (nk) NOT in this set is likely an Unlinked DKOM artifact.
+  public buildReachabilityMap(): Set<number> {
+    const reachable = new Set<number>();
+    const rootCellIndex = this.view.getUint32(0x24, true); // Root Cell Index from Base Block
+    const rootOffset = this.resolveCellOffset(rootCellIndex);
+
+    if (rootOffset) {
+      this.traverseTree(rootOffset, reachable);
+    } else {
+      // Fallback: If header is corrupt, try first valid NK in first bin
+      if(this.binMap.length > 0) {
+         const firstBin = this.binMap[0];
+         const fallback = firstBin.physicalOffset + 0x24; // Usually first cell
+         if (this.view.getUint16(fallback, true) === SIG_NK) {
+            this.traverseTree(fallback, reachable);
+         }
+      }
+    }
+    return reachable;
+  }
+
+  private traverseTree(offset: number, visited: Set<number>, depth = 0) {
+    if (visited.has(offset) || depth > 256) return;
+    visited.add(offset);
+
+    // Ensure it's a Key Node
+    if (this.view.getUint16(offset, true) !== SIG_NK) return;
+
+    // Get Subkey List Index (0x1C) and Count (0x14)
+    const subkeyCount = this.view.getUint32(offset + 0x14, true);
+    const subkeyListIndex = this.view.getUint32(offset + 0x1C, true);
+
+    // Safety Brake: Ignore massive subkey counts which are likely corruption
+    if (subkeyCount > 0 && subkeyCount < 0x100000 && subkeyListIndex !== 0xFFFFFFFF) {
+      const listOffset = this.resolveCellOffset(subkeyListIndex);
+      if (listOffset) {
+        this.traverseSubkeyList(listOffset, subkeyCount, visited, depth + 1);
+      }
+    }
+  }
+
+  private traverseSubkeyList(listOffset: number, count: number, visited: Set<number>, depth: number) {
+    // FIX: Cycle detection for Lists. 
+    // Corrupted hives often have lists pointing to themselves.
+    if (visited.has(listOffset)) return; 
+    visited.add(listOffset);
+
+    // Basic List Parsing (li, ri, lf, lh)
+    // Signature at offset 0
+    const sig = this.view.getUint16(listOffset, true);
+    const countInList = this.view.getUint16(listOffset + 0x02, true); // Number of elements in this list
+
+    // Safety Brake: Cap list iteration to prevent infinite loops on garbage
+    if (countInList > 0x10000) return;
+
+    // li (0x696C) or ri (0x6972) -> Index of other lists
+    if (sig === 0x696C || sig === 0x6972) {
+       for(let i=0; i<countInList; i++) {
+          const nextListIndex = this.view.getUint32(listOffset + 0x04 + (i * 4), true);
+          const nextOffset = this.resolveCellOffset(nextListIndex);
+          if (nextOffset) this.traverseSubkeyList(nextOffset, count, visited, depth); // Recurse
+       }
+    }
+    // lf (0x666C) or lh (0x686C) -> Actual Key Indexes (Hash Leaf / Fast Leaf)
+    else if (sig === 0x666C || sig === 0x686C) {
+       for(let i=0; i<countInList; i++) {
+          const keyIndex = this.view.getUint32(listOffset + 0x04 + (i * 8), true); // Offset depends on hash/no-hash, usually 4 bytes offset, 4 bytes hash
+          const keyOffset = this.resolveCellOffset(keyIndex);
+          if (keyOffset) {
+             this.traverseTree(keyOffset, visited, depth);
+          }
+       }
+    }
   }
 
   public readNodeName(offset: number): string {
@@ -86,10 +169,8 @@ export class HiveGraph {
       }
     } else {
       // UTF-16LE
-      // We take bytes. If standard unicode, typical english is Byte, 00, Byte, 00.
       for (let i = 0; i < nameLen; i++) {
         const charCode = this.data[nameOffset + i];
-        // Simple heuristic: if 0, skip (it's likely the high byte of a latin char)
         if (charCode !== 0) {
           name += (charCode >= 32 && charCode <= 126) ? String.fromCharCode(charCode) : '.';
         }
@@ -104,12 +185,10 @@ export class HiveGraph {
     let steps: string[] = [];
     let depth = 0;
 
-    // Get name of current node
     const initialName = this.readNodeName(currentOffset);
     pathParts.unshift(initialName);
 
     while (depth < maxDepth) {
-      // Get Parent Cell Index at 0x10
       const parentCID = this.view.getInt32(currentOffset + 0x10, true); 
       
       if (parentCID === -1 || parentCID === 0) {
@@ -124,7 +203,6 @@ export class HiveGraph {
         break;
       }
 
-      // Check if parent is a valid NK
       const sig = this.view.getUint16(parentOffset, true);
       if (sig !== SIG_NK) {
         steps.push(`Parent at ${parentOffset.toString(16)} is not a Key Node (sig: ${sig.toString(16)})`);
@@ -152,37 +230,27 @@ export class HiveGraph {
     const skCID = this.view.getInt32(offset + 0x20, true);
     const timestamp = this.view.getBigUint64(offset + 0x04, true);
 
-    // 1. Virtualization
     if ((flags & 0x10) || (flags & 0x20)) {
       warnings.push("Virtualization Flags Detected (0x10/0x20)");
     }
-    if (parentCID === -1 && (flags & 0x04) === 0) { // Not root but no parent
+    if (parentCID === -1 && (flags & 0x04) === 0) { 
       warnings.push("Orphaned Node (Possible Ghost Key)");
     }
 
-    // 2. ACL / Hidden
     if (skCID !== -1) {
       const skOffset = this.resolveCellOffset(skCID);
       if (skOffset) {
          const skSig = this.view.getUint16(skOffset, true);
-         if (skSig === 0x6B73) { // sk
-            // Security descriptor check
-            const sdLen = this.view.getUint32(skOffset + 0x10, true); // Descriptor Length
+         if (skSig === 0x6B73) { 
+            const sdLen = this.view.getUint32(skOffset + 0x10, true); 
             if (sdLen < 20) warnings.push("Suspiciously Small Security Descriptor (Possible Null DACL)");
          }
       }
     }
 
-    // 3. Timestamp Anomalies
     const year = new Date(Number(timestamp / 10000n - 11644473600000n)).getFullYear();
     if (year < 1990 || year > 2035) {
       warnings.push("Invalid Timestamp (Composite Merge Artifact or Corruption)");
-    }
-
-    // 4. Corruption (Name)
-    const name = this.readNodeName(offset);
-    if (name.includes("ERR") || name.length === 0) {
-      warnings.push("Name Parsing Error (Corruption)");
     }
 
     return warnings;

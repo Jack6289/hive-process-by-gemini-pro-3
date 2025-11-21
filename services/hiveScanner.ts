@@ -6,68 +6,50 @@ const SIG_NK = 0x6B6E;
 const SIG_DESTROYED = 0x5858; // 'XX'
 const SIG_HBIN = 0x6E696268;
 
-// Attempts to calculate the correct name length for a corrupted 'nk' header
-// and returns a patched byte array for the cell.
 export const repairKeyNode = (cellBytes: Uint8Array): Uint8Array | null => {
   if (cellBytes.length < 0x50) return null;
   
   const view = new DataView(cellBytes.buffer, cellBytes.byteOffset, cellBytes.byteLength);
   
-  // Check Signature (must be nk or maybe we are forcing repair on a suspected one)
   const sig = view.getUint16(0, true);
-  if (sig !== SIG_NK) return null; // We only repair valid 'nk' signatures
+  if (sig !== SIG_NK) return null; 
 
   const flags = view.getUint16(0x02, true);
-  const isCompressed = (flags & 0x20) !== 0; // ASCII
+  const isCompressed = (flags & 0x20) !== 0; 
 
-  // Name starts at 0x4C (76).
-  // We need to scan from there to find the real length.
   let calculatedLen = 0;
   const maxLen = cellBytes.length - 0x4C; 
   
   if (isCompressed) {
-     // ASCII: Scan until null or non-printable
      for (let i = 0; i < maxLen; i++) {
         const b = cellBytes[0x4C + i];
-        if (b === 0 || b < 32 || b > 126) break; // Stop at null or control
+        if (b === 0 || b < 32 || b > 126) break; 
         calculatedLen++;
      }
   } else {
-     // UTF-16LE: Scan 2 bytes. Stop at 0x0000 or weird control chars.
      for (let i = 0; i < maxLen; i+=2) {
         const val = view.getUint16(0x4C + i, true);
         if (val === 0) break;
-        // Basic heuristic for printable unicode range often seen in registry
         calculatedLen += 2;
      }
   }
 
   if (calculatedLen === 0) return null;
 
-  // Create patched buffer
   const patched = new Uint8Array(cellBytes);
   const patchedView = new DataView(patched.buffer, patched.byteOffset, patched.byteLength);
 
-  // Fix Name Length (0x48)
   patchedView.setUint16(0x48, calculatedLen, true);
-  
-  // Zero Class Length (0x4A) - usually 0 unless specific class used
   patchedView.setUint16(0x4A, 0, true);
-
-  // Reset Class Index (0x30) to -1 (FFFFFFFF) if it was pointing to garbage
   patchedView.setInt32(0x30, -1, true);
 
   return patched;
 };
 
 const getBinRelativeOffset = (data: Uint8Array, absOffset: number): number => {
-  // Walk backwards to find the nearest 'hbin' signature
-  // We assume bins are 4KB aligned usually, or at least nearby.
-  // Scan limit 64KB backwards.
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let cursor = absOffset & ~0xFFF; // Start at page boundary
+  let cursor = absOffset & ~0xFFF; 
   
-  // If page boundary isn't hbin, search backwards page by page
   for(let i=0; i<16; i++) {
      if (cursor < 0) break;
      if (cursor + 4 <= data.length && view.getUint32(cursor, true) === SIG_HBIN) {
@@ -76,14 +58,13 @@ const getBinRelativeOffset = (data: Uint8Array, absOffset: number): number => {
      cursor -= 4096;
   }
   
-  // Fallback: linear scan backwards if alignment failed (corrupted hive)
   cursor = absOffset;
   const limit = Math.max(0, absOffset - 65536);
   while(cursor >= limit) {
      if (cursor + 4 <= data.length && view.getUint32(cursor, true) === SIG_HBIN) {
          return absOffset - cursor;
      }
-     cursor -= 4; // scan 4 bytes
+     cursor -= 4; 
   }
 
   return -1;
@@ -91,33 +72,31 @@ const getBinRelativeOffset = (data: Uint8Array, absOffset: number): number => {
 
 export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
   const findings: ScanFinding[] = [];
-  
-  // Initialize the Graph Engine
   const graph = new HiveGraph(data);
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const len = data.length;
 
-  // Optimize: Align to 4 bytes
+  // v3.1 Active Logic: Build Reachability Map to find DKOM keys
+  const reachableOffsets = graph.buildReachabilityMap();
+
+  // OPTIMIZATION: Scan in 8-byte alignment steps.
+  // Registry cells are 8-byte aligned relative to bin start.
   let cursor = 0x0; 
   
   while (cursor < len - 8) {
     const sig = view.getUint16(cursor, true);
 
-    // Check Cell Allocation Status (Size at -4)
     let allocationStatus: 'Allocated' | 'Free' | 'Unknown' = 'Unknown';
     if (cursor >= 4) {
        const cellSize = view.getInt32(cursor - 4, true);
-       // Negative size = Allocated (Active)
-       // Positive size = Free (Deleted)
        allocationStatus = cellSize < 0 ? 'Allocated' : 'Free';
     }
 
-    // Case 1: Explicitly Destroyed Artifact
     if (sig === SIG_DESTROYED) {
        findings.push({
           id: `destroyed-${cursor}`,
           offset: cursor,
-          length: 80, // Estimate
+          length: 80, 
           type: 'DESTROYED_ARTIFACT',
           name: "[DESTROYED]",
           description: "User-patched artifact (Signature 'XX' detected)",
@@ -127,20 +106,62 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
           binRelativeOffset: getBinRelativeOffset(data, cursor)
        });
     }
-    // Case 2: Valid Key Node
     else if (sig === SIG_NK) {
-      
-      // Basic Validity Check
       const nameLen = view.getUint16(cursor + 0x48, true);
+      const classLen = view.getUint16(cursor + 0x4A, true); // Offset 0x4A
+      const flags = view.getUint16(cursor + 0x02, true);
       
       if (nameLen > 0 && nameLen < 4096 && cursor + 0x4C + nameLen <= len) {
         const heuristics = graph.analyzeHeuristics(cursor);
         const name = graph.readNodeName(cursor);
-        
+        const parentCID = view.getInt32(cursor + 0x10, true);
+        const resolution = graph.resolvePath(cursor);
+
         let type: ScanFinding['type'] | null = null;
         let desc = "";
         
-        if (heuristics.some(h => h.includes("Virtualization") || h.includes("Ghost"))) {
+        // 1. NULL-BYTE HIDING (v3.1 Active Check)
+        // OPTIMIZATION: Avoid allocation slice. Check manually.
+        let embeddedNullIndex = -1;
+        // Only relevant for ASCII (Compressed) keys, UTF16 has 00 naturally
+        if ((flags & 0x20) && nameLen > 0) { 
+             for(let k=0; k<nameLen; k++) {
+                if (data[cursor + 0x4C + k] === 0) {
+                    embeddedNullIndex = k;
+                    break;
+                }
+             }
+        }
+        
+        if (embeddedNullIndex !== -1) {
+             type = 'ROOTKIT_NULL_EMBEDDED';
+             desc = `Detected Null-Byte Terminator at pos ${embeddedNullIndex}. Hides suffix from Windows API.`;
+        }
+
+        // 2. CLASS DATA INJECTION (v3.1 Active Check)
+        else if (classLen > 0) {
+             // Class Data is rare. If it contains binary garbage, it's suspicious.
+             const classOffset = view.getInt32(cursor + 0x30, true);
+             if (classOffset !== -1) {
+                 // Note: We don't fully resolve class offset here to save time, 
+                 // but mere presence of Class Data in non-standard keys is flagged.
+                 // Heuristic: If name is standard (not Shell/COM), but has Class Data.
+                 if (!name.includes("CLSID") && !name.includes("Interface")) {
+                     type = 'ROOTKIT_CLASS_INJECTION';
+                     desc = `Abnormal Class Data (${classLen} bytes) detected on standard key. Potential payload injection.`;
+                 }
+             }
+        }
+
+        // 3. UNLINKED / DKOM (v3.1 Active Check)
+        else if (!reachableOffsets.has(cursor) && allocationStatus === 'Allocated') {
+             // Key exists, is marked allocated, has valid header, but tree walk didn't find it.
+             type = 'ROOTKIT_UNLINKED_DKOM';
+             desc = "DKOM Detected: Key exists in binary but is unlinked from Registry Tree.";
+        }
+
+        // Legacy Checks
+        else if (heuristics.some(h => h.includes("Virtualization") || h.includes("Ghost"))) {
           type = 'VIRTUALIZED';
           desc = "Ghost/Virtualization artifact detected.";
         } else if (heuristics.some(h => h.includes("Security") || h.includes("DACL"))) {
@@ -151,27 +172,15 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
           desc = "Structural Corruption or Timestamp Anomaly.";
         }
         
-        // Special Case: Null Bytes in Name (Stubborn)
-        const nameBytes = data.slice(cursor + 0x4C, cursor + 0x4C + nameLen);
-        let hasNull = false;
-        for(let b of nameBytes) { if (b === 0) hasNull = true; }
-        if (hasNull && !type) {
-           type = 'STUBBORN';
-           desc = "Embedded Nulls prevent deletion.";
-        }
-
         if (type) {
-          const parentCID = view.getInt32(cursor + 0x10, true);
-          const resolution = graph.resolvePath(cursor);
-
           findings.push({
             id: `anom-${cursor}`,
             offset: cursor,
             length: 0x50 + nameLen,
             type: type,
-            name: name,
+            name: name || "[UNREADABLE]",
             description: desc,
-            confidence: 0.85,
+            confidence: type.includes('ROOTKIT') ? 1.0 : 0.85,
             allocationStatus,
             binRelativeOffset: getBinRelativeOffset(data, cursor),
             inference: {
@@ -185,13 +194,12 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
         }
       }
     }
-    cursor += 4;
+    cursor += 8; // Step alignment
   }
 
   return findings;
 };
 
-// Helper to find all occurrences of a byte pattern
 const findBytePattern = (data: Uint8Array, pattern: number[]): number[] => {
   const offsets: number[] = [];
   const len = data.length;
@@ -222,7 +230,6 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
   const targetLeaf = parts[parts.length - 1]; 
   const queryPath = parts.join('\\').toLowerCase();
 
-  // --- PHASE 1: STANDARD STRUCTURED SCAN ---
   const foundOffsets = new Set<number>();
   const targetLeafLower = targetLeaf.toLowerCase();
 
@@ -231,7 +238,6 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
     if (view.getUint16(cursor, true) === SIG_NK) {
       const name = graph.readNodeName(cursor);
       
-      // Get Allocation Status
       let allocationStatus: 'Allocated' | 'Free' | 'Unknown' = 'Unknown';
       if (cursor >= 4) {
          const cellSize = view.getInt32(cursor - 4, true);
@@ -271,11 +277,9 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
         });
       }
     }
-    cursor += 4;
+    cursor += 8; // Optimization: Step 8
   }
 
-  // --- PHASE 2: RAW STRING SCRAPER (For corrupted/deleted/ghost keys) ---
-  // Heuristic: Generate TitleCase, LowerCase, UpperCase variants to approximate case-insensitivity
   const variants = new Set([
     targetLeaf, 
     targetLeaf.toLowerCase(), 
@@ -296,7 +300,6 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
      rawMatches.push(...findBytePattern(data, utf16));
   });
 
-  // Deduplicate
   const uniqueMatches = Array.from(new Set(rawMatches));
 
   uniqueMatches.forEach(strOffset => {
@@ -306,7 +309,6 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
        
        const sig = view.getUint16(possibleNodeStart, true);
        
-       // Get Allocation Status (Raw Scraper)
        let allocationStatus: 'Allocated' | 'Free' | 'Unknown' = 'Unknown';
        if (possibleNodeStart >= 4) {
           const cellSize = view.getInt32(possibleNodeStart - 4, true);
@@ -316,7 +318,7 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
        const relativeOffset = getBinRelativeOffset(data, possibleNodeStart);
 
        if (sig === SIG_NK) {
-          // Valid node, already processed in Phase 1
+          // Valid node
        } else if (sig === SIG_DESTROYED) {
           findings.push({
             id: `destroyed-${possibleNodeStart}`,
@@ -331,7 +333,6 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
             binRelativeOffset: relativeOffset
           });
        } else {
-          // Check 2: Signature is corrupted or missing, BUT length matches?
           const nameLen = view.getUint16(possibleNodeStart + 0x48, true);
           const flags = view.getUint16(possibleNodeStart + 0x02, true);
           
@@ -341,11 +342,11 @@ export const searchHive = (data: Uint8Array, query: string): ScanFinding[] => {
 
           if (nameLen > 0 && nameLen < 256 && flags < 0x100) {
              type = 'RECOVERED_KEY';
-             desc = "Header signature corrupted, but structure valid. Likely recoverable.";
+             desc = "Header signature corrupted, but structure valid.";
              confidence = 0.7;
           }
 
-          if (nameLen > 0) { // Only report if there is SOME structural evidence
+          if (nameLen > 0) { 
               findings.push({
                 id: `scrape-${strOffset}`,
                 offset: possibleNodeStart, 

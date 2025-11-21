@@ -80,6 +80,12 @@ const App: React.FC = () => {
          const findings = scanHiveForAnomalies(result.patchedBuffer);
          setScanResults(findings);
          setIsScanning(false);
+         
+         // Auto-select first finding
+         if (findings.length > 0) {
+            const f = findings[0];
+            onSelectionChange(f.offset, f.offset + f.length - 1, result.patchedBuffer);
+         }
       }, 100);
 
     } catch (err) {
@@ -92,11 +98,16 @@ const App: React.FC = () => {
   const performScan = () => {
     if (!fileData) return;
     setIsScanning(true);
-    
     setTimeout(() => {
       const findings = scanHiveForAnomalies(fileData);
       setScanResults(findings);
       setIsScanning(false);
+      
+      // Auto-select first finding to ensure UI buttons are enabled
+      if (findings.length > 0) {
+          const f = findings[0];
+          onSelectionChange(f.offset, f.offset + f.length - 1);
+      }
     }, 100);
   };
 
@@ -109,6 +120,12 @@ const App: React.FC = () => {
       const findings = searchHive(fileData, searchQuery.trim());
       setScanResults(findings);
       setIsScanning(false);
+      
+      // Auto-select first match
+      if (findings.length > 0) {
+          const f = findings[0];
+          onSelectionChange(f.offset, f.offset + f.length - 1);
+      }
     }, 50);
   };
 
@@ -258,7 +275,7 @@ const App: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "v3_healed_" + fileName;
+    a.download = "v3.1_healed_" + fileName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -310,9 +327,9 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="font-bold text-lg tracking-wide text-gray-100 leading-none">
-              HiveMind <span className="text-red-500">v3.0</span>
+              HiveMind <span className="text-red-500">v3.1</span>
             </h1>
-            <p className="text-[9px] text-gray-500 tracking-widest uppercase">AI Rootkit & Malware Engine</p>
+            <p className="text-[9px] text-gray-500 tracking-widest uppercase">Active Rootkit Engine (Null/DKOM/Class)</p>
           </div>
         </div>
         
@@ -365,13 +382,11 @@ const App: React.FC = () => {
                <button
                  onClick={performScan}
                  disabled={isScanning}
-                 className={`px-3 py-1.5 text-xs font-bold rounded border uppercase tracking-wide flex items-center gap-2
-                   ${isScanning 
-                     ? 'bg-gray-800 border-gray-700 text-gray-400' 
-                     : 'bg-red-900/10 hover:bg-red-900/30 text-red-400 border-red-900/50 transition-all'}
+                 className={`px-3 py-1.5 text-xs font-bold rounded border border-gray-700 uppercase tracking-wide flex items-center gap-2
+                   ${isScanning ? 'bg-gray-800 text-gray-500' : 'bg-red-900/20 hover:bg-red-900/40 text-red-400 border-red-900/50'}
                  `}
                >
-                 {isScanning ? 'Deep Scanning...' : 'Threat Scan'}
+                 {isScanning ? 'Scanning...' : 'Threat Scan'}
                </button>
 
                <button
@@ -442,11 +457,11 @@ const App: React.FC = () => {
              </div>
              
              <div className="text-center space-y-2">
-               <h3 className="text-2xl font-bold text-gray-200 tracking-tight">HiveMind AI v3.0</h3>
+               <h3 className="text-2xl font-bold text-gray-200 tracking-tight">HiveMind AI v3.1</h3>
                <p className="text-gray-500 max-w-md mx-auto leading-relaxed">
-                 Rootkit & Malware Registry Engine.
+                 Active Rootkit & Malware Forensics.
                  <br/>
-                 <span className="text-red-400">AI Auto-Heal</span> • <span className="text-cyan-400">Threat Intelligence</span> • <span className="text-green-400">Script Reconstruction</span>
+                 <span className="text-red-400">Null-Embedding</span> • <span className="text-cyan-400">Class Injection</span> • <span className="text-green-400">DKOM Detection</span>
                </p>
              </div>
 
@@ -471,11 +486,10 @@ const App: React.FC = () => {
       <footer className="h-7 bg-gray-900 border-t border-gray-800 flex items-center px-4 text-[10px] text-gray-600 justify-between shrink-0 select-none">
         <div className="flex gap-6 font-mono">
            <span>ENGINE: <span className="text-cyan-600">GEMINI-2.5-FLASH</span></span>
-           <span>MODE: <span className="text-red-400">OFFENSIVE_DEFENSE_ENABLED</span></span>
-           <span>STATUS: <span className={isScanning ? "text-yellow-500 animate-pulse" : "text-green-600"}>{isScanning ? 'ANALYZING...' : 'IDLE'}</span></span>
+           <span>MODE: <span className="text-red-400">ACTIVE_ROOTKIT_SCANNING</span></span>
         </div>
         <div className="opacity-50">
-           v3.0 (STABLE)
+           v3.1 (STABLE)
         </div>
       </footer>
     </div>

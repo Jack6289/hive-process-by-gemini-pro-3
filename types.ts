@@ -19,8 +19,8 @@ export interface AnalysisResult {
   technicalDetails: string;
   recommendation: string;
   offsetDetected?: string;
-  autoFixHex?: string; // Hex string for automatic patching
-  generatedScript?: string; // Python/PowerShell script for reconstruction
+  autoFixHex?: string; // New: Hex string for automatic patching
+  generatedScript?: string; // New: Python/PowerShell script for reconstruction
 }
 
 export interface InferenceInsight {
@@ -35,7 +35,7 @@ export interface ScanFinding {
   id: string;
   offset: number;
   length: number;
-  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_HOOK';
+  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_NULL_EMBEDDED' | 'ROOTKIT_CLASS_INJECTION' | 'ROOTKIT_UNLINKED_DKOM';
   name: string;
   description: string;
   confidence: number;
@@ -51,6 +51,6 @@ export enum AnalysisMode {
   PERMISSION_BYPASS = 'PERMISSION_BYPASS',       
   COMPOSITE_LAYERING = 'COMPOSITE_LAYERING',     
   INTEGRITY_RECOVERY = 'INTEGRITY_RECOVERY',
-  ROOTKIT_HEURISTIC = 'ROOTKIT_HEURISTIC',       // New: v3.0
-  SCRIPT_GENERATION = 'SCRIPT_GENERATION'        // New: v3.0
+  ROOTKIT_HEURISTIC = 'ROOTKIT_HEURISTIC',       // v3.0/v3.1: Active Engine
+  SCRIPT_GENERATION = 'SCRIPT_GENERATION'        // v3.0: New Engine
 }

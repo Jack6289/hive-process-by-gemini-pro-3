@@ -1,5 +1,5 @@
 {
   "name": "HiveMind Forensics",
-  "description": "A specialized Windows Registry Hive binary analyzer powered by Gemini. v3.0 features AI Rootkit Detection, Intelligent Self-Healing, and Script-Based Hive Reconstruction.",
+  "description": "A specialized Windows Registry Hive binary analyzer powered by Gemini. v3.1 features Active Rootkit Detection (Null-Hiding, DKOM, Class Injection) and AI-driven forensics.",
   "requestFramePermissions": []
 }

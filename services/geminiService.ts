@@ -1,18 +1,19 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { AnalysisMode, AnalysisResult } from '../types';
 
 const getClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-// v3.0: Enhanced System Prompt with "Threat Intelligence"
+// v3.1: Enhanced System Prompt with Binary Rootkit Context
 const SYSTEM_PROMPT = `
-You are HiveMind AI v3.0, an advanced Offensive Security & Forensics Engine specialized in Windows Registry internals.
+You are HiveMind AI v3.1, an advanced Offensive Security & Forensics Engine specialized in Windows Registry internals.
 You process raw binary data from Registry Hives (NTUSER.DAT, SYSTEM, SAM, SOFTWARE).
 
 YOUR CAPABILITIES:
-1. **Rootkit Detection**: You know the patterns of rootkits (e.g., Null-terminator hiding, Unlinked keys, DKOM hidden keys).
+1. **Rootkit Detection**: You recognize binary patterns like Null-terminator hiding (embedded 0x00), Unlinked DKOM keys, and Class Data Injection.
 2. **Malware Heuristics**: You recognize persistence hooks (AppInit_DLLs, IFEO, COM Hijacks, Service Replacement).
-3. **Auto-Healing**: You can generate raw hex patches to neutralize threats (e.g., nop-out malicious values, restore standard ACLs).
-4. **Script Generation**: For irreparable damage, you generate Python (using python-registry) or PowerShell scripts to reconstruct the hive.
+3. **Auto-Healing**: You can generate raw hex patches to neutralize threats (e.g., nop-out malicious values, restore standard ACLs, clear Class Data).
+4. **Script Generation**: For irreparable damage, you generate Python/PowerShell scripts to reconstruct the hive.
 
 OUTPUT FORMAT:
 Always return valid JSON.
@@ -21,16 +22,20 @@ Always return valid JSON.
 - Strictly escape backslashes in paths (e.g., "C:\\\\Windows").
 `;
 
+const cleanJson = (text: string): string => {
+    return text.replace(/^```json\s*/g, "").replace(/\s*```$/g, "").trim();
+};
+
 export const analyzeHiveChunk = async (
   hexString: string, 
   mode: AnalysisMode, 
   offset: number,
-  contextInfo?: { path: string, parentName: string, flags: number }
+  contextInfo?: { path: string, parentName: string, flags: number, findingType?: string }
 ): Promise<AnalysisResult> => {
   const ai = getClient();
   
   let problemStatement = "";
-  const contextStr = contextInfo ? `PATH: ${contextInfo.path}\nFLAGS: 0x${contextInfo.flags.toString(16)}` : "PATH: Unknown";
+  const contextStr = contextInfo ? `PATH: ${contextInfo.path}\nFLAGS: 0x${contextInfo.flags.toString(16)}\nFINDING_TYPE: ${contextInfo.findingType || 'N/A'}` : "PATH: Unknown";
 
   switch (mode) {
     case AnalysisMode.GHOST_VIRTUALIZATION:
@@ -70,18 +75,25 @@ export const analyzeHiveChunk = async (
       `;
       break;
     
-    // --- v3.0 NEW ENGINES ---
+    // --- v3.1 UPDATED ENGINES ---
     case AnalysisMode.ROOTKIT_HEURISTIC:
       problemStatement = `
-        TASK: ROOTKIT & MALWARE PATTERN MATCHING.
+        TASK: ROOTKIT & MALWARE ANALYSIS (v3.1 Active Mode).
         - Context: ${contextStr}
-        - Analyze the binary for specific hooking techniques:
-          1. **Image File Execution Options (IFEO)**: Debugger attachment hooks.
-          2. **AppInit_DLLs**: DLL injection via User32.dll.
-          3. **Legacy Filter Drivers**: UpperFilters/LowerFilters in ControlSet services.
-          4. **COM Hijacking**: CLSID pointing to user-writable locations.
-        - Check for "Null-Byte Hiding" in the Key Name (inserting 0x00 mid-string).
-        - IF MALICIOUS: Set severity to 'critical'. Provide 'autoFixHex' to zero out the Value List offset (0x28) to detach the malware payload.
+        
+        SPECIFIC HANDLING:
+        1. **NULL_EMBEDDED**: The scanner detected 0x00 inside the key name. This hides the suffix from Windows API.
+           - HEALING: Provide 'autoFixHex' replacing the embedded nulls with '_' (0x5F).
+           
+        2. **CLASS_INJECTION**: The scanner detected suspicious Class Data (offset 0x4A len > 0).
+           - Analyze the hex for potential shellcode (0x90 sleds, 0xCC int3, shellcode patterns).
+           - HEALING: Provide 'autoFixHex' setting Class Length (offset 0x4A) to 0 and Class Offset (0x30) to -1 (0xFFFFFFFF).
+
+        3. **UNLINKED_DKOM**: The key is unlinked from the tree.
+           - Analyze if this is a legitimate deleted remnant or active DKOM.
+           - If malicious, recommend SAFE NEUTER (zeroing pointers).
+
+        4. **General Malware**: Check for IFEO, AppInit_DLLs, COM Hijacks.
       `;
       break;
 
@@ -121,7 +133,7 @@ export const analyzeHiveChunk = async (
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash', // Using Flash for speed in analysis loop
+      model: 'gemini-2.5-flash', 
       contents: fullPrompt,
       config: {
         responseMimeType: "application/json",
@@ -129,16 +141,10 @@ export const analyzeHiveChunk = async (
       }
     });
 
-    let text = response.text;
-    if (!text) throw new Error("No response from AI");
-    
-    // Cleanup
-    text = text.replace(/^```json\s*/g, "").replace(/\s*```$/g, "").trim();
-    
-    // Escape fix for paths
-    const fixedText = text.replace(/\\(?![/\\bfnrtu"])/g, "\\\\");
-
-    return JSON.parse(fixedText) as AnalysisResult;
+    const text = response.text || "";
+    // Basic sanitizer for markdown blocks if model outputs them despite instruction
+    const sanitized = cleanJson(text);
+    return JSON.parse(sanitized) as AnalysisResult;
   } catch (error) {
     console.error("Gemini Engine Error:", error);
     return {

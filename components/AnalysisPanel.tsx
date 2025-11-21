@@ -63,9 +63,6 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
     }
   };
 
-  const isKeyNode = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x6E && selectedBytes[1] === 0x6B;
-  const isAlreadyDeleted = selectedBytes && selectedBytes.length >= 2 && selectedBytes[0] === 0x58 && selectedBytes[1] === 0x58;
-
   const activeFinding = scanResults.find(f => selectionOffset >= f.offset && selectionOffset < f.offset + f.length);
   const hasActiveResults = scanResults.some(f => !f.isDeleted && f.type !== 'DESTROYED_ARTIFACT');
 
@@ -83,8 +80,8 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       // Prepare v3.0 Context Info
       const contextInfo = activeFinding ? {
           path: activeFinding.inference?.resolvedPath || "Unknown",
-          parentName: "Unknown", // In a real app, we'd query the graph engine
-          flags: 0 // We would parse this from bytes 0x02 in a real scenario
+          parentName: "Unknown", 
+          flags: 0 
       } : undefined;
 
       const response = await analyzeHiveChunk(hexString, mode, selectionOffset, contextInfo);
@@ -114,7 +111,6 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const applyAutoHeal = () => {
     if (!result?.autoFixHex || !onPatchBytes) return;
     
-    // Convert hex string back to bytes
     const hex = result.autoFixHex.replace(/\s+/g, '');
     if (hex.length % 2 !== 0) return;
     
@@ -161,9 +157,9 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       <div className="p-5 border-b border-gray-800 bg-gray-900/50">
         <h2 className="text-lg font-bold text-cyan-400 flex items-center gap-2 tracking-wide">
            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-           AI Engine v3.0 <span className="text-[9px] ml-auto text-red-400 border border-red-900 bg-red-950 px-1 rounded animate-pulse">THREAT_INTEL</span>
+           AI Engine v3.1 <span className="text-[9px] ml-auto text-red-400 border border-red-900 bg-red-950 px-1 rounded shadow-[0_0_5px_rgba(220,38,38,0.5)]">THREAT_INTEL</span>
         </h2>
-        <p className="text-[10px] text-gray-500 mt-1 font-mono">HEURISTICS + ROOTKIT DETECTION ENABLED</p>
+        <p className="text-[10px] text-gray-500 mt-1 font-mono">HEURISTICS + ACTIVE ROOTKIT DETECTION ENABLED</p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6">
@@ -173,7 +169,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
            <div className="space-y-2">
              <div className="flex items-end justify-between mb-2">
                 <div className="text-[10px] font-bold text-cyan-500 uppercase tracking-widest">
-                   Active Findings ({scanResults.length})
+                   Candidates ({scanResults.length})
                 </div>
                 {hasActiveResults && onDeleteAll && (
                   <button 
@@ -189,13 +185,13 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                   <div 
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
-                    className={`p-2 border-b border-gray-800 cursor-pointer text-[10px] font-mono flex justify-between
+                    className={`p-2 border-b border-gray-800 cursor-pointer text-[10px] font-mono flex justify-between items-center
                       ${activeFinding?.id === finding.id ? 'bg-cyan-900/30 text-cyan-300' : 'text-gray-400 hover:bg-gray-900'}
                       ${finding.isDeleted ? 'line-through opacity-50' : ''}
                     `}
                   >
                     <span className="truncate max-w-[200px]">{finding.name}</span>
-                    <span>{finding.type}</span>
+                    <span className="opacity-50">{finding.type.substring(0,4)}</span>
                   </div>
                 ))}
              </div>
@@ -243,13 +239,22 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                </div>
              </div>
            ) : (
-             <div className="text-center text-[10px] text-gray-600 py-4">No Data Selected</div>
+             <div className="text-center text-[10px] text-gray-600 py-4">
+               Select a finding or byte range to enable patching.
+             </div>
            )}
         </div>
 
         {/* v3.0 Intelligence Modules */}
         <div>
           <div className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-3">AI Intelligence Modules</div>
+          
+          {!selectedBytes && (
+            <div className="mb-3 p-2 border border-yellow-900/30 bg-yellow-900/10 rounded text-[10px] text-yellow-500 flex items-center gap-2">
+               <span>⚠</span> Select a finding or hex range above to enable AI analysis.
+            </div>
+          )}
+
           <div className="grid grid-cols-1 gap-2">
             {modes.map((m) => (
               <button
@@ -259,6 +264,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                 className={`group flex items-center gap-3 p-2.5 rounded border text-left transition-all
                   ${m.id === AnalysisMode.ROOTKIT_HEURISTIC ? 'border-red-900/30 bg-red-900/10 hover:bg-red-900/20' : 'border-gray-800 bg-gray-800/50 hover:bg-gray-800'}
                   ${loading && activeMode === m.id ? 'animate-pulse border-cyan-500/50' : ''}
+                  disabled:opacity-40 disabled:cursor-not-allowed disabled:grayscale
                 `}
               >
                 <div className="text-xl">{m.icon}</div>
