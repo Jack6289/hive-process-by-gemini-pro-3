@@ -13,9 +13,12 @@ interface AnalysisPanelProps {
   onDeleteAll?: () => void; 
   onPatchBytes?: (offset: number, bytes: Uint8Array) => void;
   onContextChange?: (offset: number, length: number) => void;
+  onModeChange?: (mode: string) => void;
+  actionStatus?: 'idle' | 'starting' | 'processing' | 'completed';
 }
 
-const AnalysisPanel: React.FC<AnalysisPanelProps> = ({ 
+// Optimized Component with Memoization to prevent unnecessary re-renders
+const AnalysisPanel: React.FC<AnalysisPanelProps> = React.memo(({ 
   selectedBytes, 
   selectionOffset, 
   scanResults, 
@@ -23,7 +26,9 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   onDeleteFinding,
   onDeleteAll,
   onPatchBytes,
-  onContextChange
+  onContextChange,
+  onModeChange,
+  actionStatus = 'idle'
 }) => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -39,7 +44,8 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
 
   useEffect(() => {
     if (selectedBytes) {
-      setEditBytes(Array.from(selectedBytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()));
+      const hexArray = Array.from(selectedBytes).map((b: number) => b.toString(16).padStart(2, '0').toUpperCase());
+      setEditBytes(hexArray);
       setIsEditing(false);
       setOffsetInput(selectionOffset.toString(16).toUpperCase());
       setLengthInput(selectedBytes.length.toString());
@@ -47,12 +53,6 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       setEditBytes([]);
     }
   }, [selectedBytes, selectionOffset]);
-
-  // Reset result when selection changes
-  useEffect(() => {
-    setResult(null);
-    setActiveMode(null);
-  }, [selectionOffset]);
 
   const commitContextChange = () => {
     if (!onContextChange) return;
@@ -66,9 +66,15 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
   const activeFinding = scanResults.find(f => selectionOffset >= f.offset && selectionOffset < f.offset + f.length);
   const hasActiveResults = scanResults.some(f => !f.isDeleted && f.type !== 'DESTROYED_ARTIFACT');
 
+  // Show button if there are active results OR if we are in a Completed/Processing state (Feedback)
+  const showNeuterAll = hasActiveResults || actionStatus === 'completed' || actionStatus === 'processing' || actionStatus === 'starting';
+
   const handleAnalyze = async (mode: AnalysisMode) => {
     if (!selectedBytes || selectedBytes.length === 0) return;
+    
     setActiveMode(mode);
+    if (onModeChange) onModeChange(mode);
+    
     setLoading(true);
     setResult(null);
     
@@ -106,6 +112,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
     const byteArray = new Uint8Array(editBytes.map(h => parseInt(h, 16) || 0));
     onPatchBytes(selectionOffset, byteArray);
     setIsEditing(false);
+    if (onModeChange) onModeChange("MANUAL_HEX_PATCH");
   };
 
   const applyAutoHeal = () => {
@@ -121,15 +128,20 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
     
     onPatchBytes(selectionOffset, bytes);
     alert("AI Auto-Heal Applied Successfully.");
+    if (onModeChange) onModeChange("AI_AUTO_HEAL_APPLIED");
   };
 
   const applyAutoRepair = () => {
     if (!selectedBytes || !onPatchBytes) return;
     const repaired = repairKeyNode(selectedBytes);
+    
+    if (onModeChange) onModeChange("STRUCTURAL_REPAIR");
+    
     if (repaired) {
       onPatchBytes(selectionOffset, repaired);
+      alert("Key Structure successfully rebuilt (Name/Class Lengths reset).");
     } else {
-      alert("Could not automatically repair this structure. Try manual patching.");
+      alert("Could not automatically repair this structure.\n\nReason: Signature 'nk' mismatch or insufficient length.\n\nTry manual patching in Hex View.");
     }
   };
 
@@ -157,31 +169,43 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       <div className="p-5 border-b border-gray-800 bg-gray-900/50">
         <h2 className="text-lg font-bold text-cyan-400 flex items-center gap-2 tracking-wide">
            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-           AI Engine v3.1 <span className="text-[9px] ml-auto text-red-400 border border-red-900 bg-red-950 px-1 rounded shadow-[0_0_5px_rgba(220,38,38,0.5)]">THREAT_INTEL</span>
+           AI Engine v6.0 <span className="text-[9px] ml-auto text-green-400 border border-green-900 bg-green-950 px-1 rounded shadow-[0_0_5px_rgba(34,197,94,0.5)]">SAFE KERNEL</span>
         </h2>
-        <p className="text-[10px] text-gray-500 mt-1 font-mono">HEURISTICS + ACTIVE ROOTKIT DETECTION ENABLED</p>
+        <p className="text-[10px] text-gray-500 mt-1 font-mono">BOOT-SAFE NEUTERING ENABLED</p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6">
         
-        {/* Scan Results List (Simplified for v3.0 view) */}
+        {/* Scan Results List */}
         {scanResults.length > 0 && (
            <div className="space-y-2">
              <div className="flex items-end justify-between mb-2">
                 <div className="text-[10px] font-bold text-cyan-500 uppercase tracking-widest">
                    Candidates ({scanResults.length})
                 </div>
-                {hasActiveResults && onDeleteAll && (
+                {showNeuterAll && onDeleteAll && (
                   <button 
-                    onClick={(e) => { e.stopPropagation(); onDeleteAll(); }}
-                    className="bg-red-900/20 hover:bg-red-900/40 text-red-400 border border-red-900/50 text-[9px] font-bold px-2 py-1 rounded uppercase"
+                    onClick={(e) => { 
+                        e.stopPropagation(); 
+                        onDeleteAll(); 
+                    }}
+                    disabled={actionStatus === 'processing' || actionStatus === 'starting'}
+                    className={`text-[9px] font-bold px-2 py-1 rounded uppercase border transition-all duration-300
+                        ${actionStatus === 'idle' ? 'bg-red-900/20 hover:bg-red-900/40 text-red-400 border-red-900/50' : ''}
+                        ${actionStatus === 'starting' || actionStatus === 'processing' ? 'bg-yellow-900/20 text-yellow-400 border-yellow-900/50 animate-pulse cursor-wait' : ''}
+                        ${actionStatus === 'completed' ? 'bg-green-900/20 text-green-400 border-green-900/50' : ''}
+                    `}
                   >
-                    Neuter All Threats
+                    {actionStatus === 'idle' && "Neuter All Threats"}
+                    {actionStatus === 'starting' && "Starting..."}
+                    {actionStatus === 'processing' && "Neutering... (Processing)"}
+                    {actionStatus === 'completed' && "✓ Operation Complete"}
                   </button>
                 )}
              </div>
              <div className="max-h-40 overflow-y-auto border border-gray-800 rounded-lg bg-black/20">
-                {scanResults.map((finding) => (
+                {/* Performance Optimization: Limit DOM nodes to first 500 to allow UI thread to breathe during massive scans */}
+                {scanResults.slice(0, 500).map((finding) => (
                   <div 
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
@@ -194,6 +218,11 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                     <span className="opacity-50">{finding.type.substring(0,4)}</span>
                   </div>
                 ))}
+                {scanResults.length > 500 && (
+                    <div className="p-2 text-center text-[9px] text-gray-600 italic border-t border-gray-800">
+                        ... and {scanResults.length - 500} more candidates. Use Search/Filter to find specific keys.
+                    </div>
+                )}
              </div>
            </div>
         )}
@@ -205,7 +234,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
              <div className="flex gap-1">
                 <input value={offsetInput} onChange={e=>setOffsetInput(e.target.value)} className="w-16 bg-black/40 border border-gray-700 text-[10px] text-cyan-300 px-1" placeholder="OFF"/>
                 <input value={lengthInput} onChange={e=>setLengthInput(e.target.value)} className="w-10 bg-black/40 border border-gray-700 text-[10px] text-cyan-300 px-1" placeholder="LEN"/>
-                <button onClick={commitContextChange} className="px-2 bg-gray-800 text-[9px] text-gray-400 border border-gray-700 hover:text-cyan-400">GO</button>
+                <button onClick={() => commitContextChange()} className="px-2 bg-gray-800 text-[9px] text-gray-400 border border-gray-700 hover:text-cyan-400">GO</button>
              </div>
            </div>
            
@@ -229,11 +258,11 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
 
                <div className="grid grid-cols-2 gap-2">
                  {isEditing ? (
-                    <button onClick={applyManualPatch} className="col-span-2 py-2 bg-yellow-900/30 border border-yellow-700 text-yellow-400 text-[10px] font-bold rounded">APPLY MANUAL PATCH</button>
+                    <button onClick={() => applyManualPatch()} className="col-span-2 py-2 bg-yellow-900/30 border border-yellow-700 text-yellow-400 text-[10px] font-bold rounded">APPLY MANUAL PATCH</button>
                  ) : (
                     <>
                        <button onClick={() => activeFinding && onDeleteFinding && onDeleteFinding(activeFinding)} className="py-2 bg-red-900/20 border border-red-900/50 text-red-400 text-[10px] font-bold rounded hover:bg-red-900/40">SAFE NEUTER</button>
-                       <button onClick={applyAutoRepair} className="py-2 bg-blue-900/20 border border-blue-900/50 text-blue-400 text-[10px] font-bold rounded hover:bg-blue-900/40">STRUCT REPAIR</button>
+                       <button onClick={() => applyAutoRepair()} className="py-2 bg-blue-900/20 border border-blue-900/50 text-blue-400 text-[10px] font-bold rounded hover:bg-blue-900/40">STRUCT REPAIR</button>
                     </>
                  )}
                </div>
@@ -290,7 +319,7 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
                {/* Auto-Fix Button (v3.0 Feature) */}
                {result.autoFixHex && (
                   <button 
-                    onClick={applyAutoHeal}
+                    onClick={() => applyAutoHeal()}
                     className="w-full py-2 bg-cyan-400/10 hover:bg-cyan-400/20 border border-cyan-400/50 text-cyan-300 text-[10px] font-bold rounded uppercase flex items-center justify-center gap-2 mb-2"
                   >
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
@@ -328,6 +357,6 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = ({
       </div>
     </div>
   );
-};
+});
 
 export default AnalysisPanel;

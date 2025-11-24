@@ -12,7 +12,7 @@ interface HexViewerProps {
 const BYTES_PER_ROW = 16;
 const PAGE_SIZE = 1024; // View 1KB at a time for performance
 
-const HexViewer: React.FC<HexViewerProps> = ({ 
+const HexViewer: React.FC<HexViewerProps> = React.memo(({ 
   data, 
   baseOffset, 
   onSelectionChange,
@@ -144,6 +144,6 @@ const HexViewer: React.FC<HexViewerProps> = ({
       </div>
     </div>
   );
-};
+});
 
 export default HexViewer;

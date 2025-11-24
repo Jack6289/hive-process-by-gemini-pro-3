@@ -18,11 +18,12 @@ YOUR CAPABILITIES:
 OUTPUT FORMAT:
 Always return valid JSON.
 - If a threat is found, provide 'autoFixHex' (a hex string of the corrected bytes).
-- If 'SCRIPT_GENERATION' mode is active, provide 'generatedScript' containing the code.
+- If 'SCRIPT_GENERATION' mode is active, you MUST provide the 'generatedScript' field containing the code block.
 - Strictly escape backslashes in paths (e.g., "C:\\\\Windows").
 `;
 
 const cleanJson = (text: string): string => {
+    // Remove Markdown blocks and any leading/trailing whitespace
     return text.replace(/^```json\s*/g, "").replace(/\s*```$/g, "").trim();
 };
 
@@ -107,7 +108,7 @@ export const analyzeHiveChunk = async (
           2. Seek to offset 0x${offset.toString(16)}.
           3. Extract the raw key name and timestamp.
           4. Create a new clean hive file and export this key's children recursively to it.
-        - Put the code in the 'generatedScript' JSON field.
+        - CRITICAL: Return the script in the 'generatedScript' JSON field.
       `;
       break;
   }
@@ -127,7 +128,7 @@ export const analyzeHiveChunk = async (
       "technicalDetails": "Deep dive",
       "recommendation": "Action",
       "autoFixHex": "Optional: Continuous hex string of the FIXED version of the input data (same length)",
-      "generatedScript": "Optional: Code block for script mode"
+      "generatedScript": "Optional: Code block string if script generation was requested"
     }
   `;
 
@@ -142,9 +143,26 @@ export const analyzeHiveChunk = async (
     });
 
     const text = response.text || "";
-    // Basic sanitizer for markdown blocks if model outputs them despite instruction
+    // Robust sanitization
     const sanitized = cleanJson(text);
-    return JSON.parse(sanitized) as AnalysisResult;
+    
+    // Handle potential escape issues in generated code
+    // We use a simplified parse but wrapped in try/catch
+    try {
+        return JSON.parse(sanitized) as AnalysisResult;
+    } catch (parseError) {
+        // If JSON parse fails, it might be due to newlines in the script string. 
+        // We attempt to rescue it or return a formatted error.
+        console.error("JSON Parse Error on AI response:", parseError);
+        return {
+            title: "AI Processing Error",
+            description: "The AI generated a script but the JSON format was invalid.",
+            severity: "medium",
+            technicalDetails: "JSON Syntax Error",
+            recommendation: "Try again.",
+            generatedScript: "# Error parsing script from AI response.\n# Raw text: \n" + text
+        };
+    }
   } catch (error) {
     console.error("Gemini Engine Error:", error);
     return {
