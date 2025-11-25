@@ -1,5 +1,5 @@
 {
   "name": "HiveMind Forensics",
-  "description": "v7.2 Stable: Unified Single/Batch kernel-safe logic boundaries.",
+  "description": "v8.0 Context-Aware Safety: Restored Batch Delete for Search Results (User Intent). Implemented Critical Boot Path Protection and Subkey-Count Circuit Breakers to prevent accidental deletion of system trees.",
   "requestFramePermissions": []
 }

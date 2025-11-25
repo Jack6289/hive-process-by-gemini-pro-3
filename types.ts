@@ -43,6 +43,9 @@ export interface ScanFinding {
   allocationStatus?: 'Allocated' | 'Free' | 'Unknown';
   binRelativeOffset?: number;
   inference?: InferenceInsight;
+  // v8.0 Safety Fields
+  isSystemCritical?: boolean;
+  subkeyCount?: number;
 }
 
 export enum AnalysisMode {

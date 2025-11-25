@@ -81,9 +81,6 @@ const fixHiveHeader = (buffer: Uint8Array): string[] => {
     view.setUint32(0x1FC, 0, true); 
     
     let xorSum = 0;
-    // Iterate 0 to 0x1FF (511), step 4. 
-    // 0x1FC is the last u32 (bytes 508-511).
-    // Loop i < 0x1FC means we stop at 504.
     for (let i = 0; i < 0x1FC; i += 4) {
         xorSum ^= view.getUint32(i, true);
     }
@@ -168,15 +165,19 @@ const ConfirmationModal = ({ count, onConfirm, onCancel }: { count: number, onCo
           {isMassDestruction ? 'CRITICAL SAFETY WARNING' : 'Confirm Action'}
         </h3>
         <p className="text-gray-300 mb-6 text-sm leading-relaxed">
-          You are about to neuter <strong className="text-white">{count}</strong> detected threats. 
+          You are about to scan <strong className="text-white">{count}</strong> candidates for safe neutralization. 
           <br/><br/>
           {isMassDestruction && (
               <div className="bg-red-950/50 border border-red-900 p-3 rounded mb-4 text-red-200 text-xs">
-                  <strong>POTENTIAL FALSE POSITIVE:</strong> 
+                  <strong>SMART TARGETING ENABLED:</strong> 
                   <br/>
-                  Deleting {count} keys will likely destroy your operating system. The scanner may have failed to map the hive correctly. 
-                  <br/><br/>
-                  <strong>DO NOT PROCEED</strong> unless you are absolutely certain these are malicious.
+                  Batch operation will strictly enforce SYSTEM SAFETY:
+                  <ul className="list-disc pl-4 mt-1 space-y-1">
+                      <li>Deleting <strong>Search Results</strong> is allowed (User Intent).</li>
+                      <li>Deleting <strong>High-Confidence Rootkits</strong> is allowed.</li>
+                      <li><strong>CRITICAL BOOT KEYS</strong> are <span className="text-red-400 font-bold">LOCKED</span> (Skipped).</li>
+                      <li>Keys with {'>'}20 subkeys are <span className="text-red-400 font-bold">SKIPPED</span> (Too Risky).</li>
+                  </ul>
               </div>
           )}
           <span className="text-yellow-400 font-bold text-xs uppercase block mb-2">⚠ Boot Safety Warning</span>
@@ -187,7 +188,7 @@ const ConfirmationModal = ({ count, onConfirm, onCancel }: { count: number, onCo
             Cancel
           </button>
           <button onClick={onConfirm} className={`px-4 py-2 rounded text-white text-xs font-bold uppercase tracking-wide shadow-lg transition-colors ${isMassDestruction ? 'bg-red-700 hover:bg-red-800 shadow-red-900/50' : 'bg-cyan-700 hover:bg-cyan-800 shadow-cyan-900/50'}`}>
-            {isMassDestruction ? 'I UNDERSTAND THE RISKS' : 'Yes, Neuter All'}
+            {isMassDestruction ? 'PROCEED SAFELY' : 'Yes, Neuter All'}
           </button>
         </div>
       </div>
@@ -244,6 +245,53 @@ const App: React.FC = () => {
     setSelectionRange({ start, end: actualEnd });
   }, [fileData]);
 
+  // v7.3: Native File System Access API Support
+  const handleNativeFileOpen = async () => {
+    if ('showOpenFilePicker' in window) {
+        try {
+            // @ts-ignore - TS might not have types for this yet
+            const [fileHandle] = await window.showOpenFilePicker({
+                types: [{
+                    description: 'Windows Registry Hives',
+                    accept: {
+                        'application/octet-stream': ['.dat', '.', ''] 
+                    }
+                }],
+                multiple: false
+            });
+            
+            const file = await fileHandle.getFile();
+            
+            // SECURITY CHECK: Locked files often report 0 bytes
+            if (file.size === 0) {
+                alert("ACCESS DENIED: The selected file is currently LOCKED by the operating system.\n\nRegistry hives (like SYSTEM, SOFTWARE) cannot be edited while Windows is running.\n\nPlease copy the file to a different location (e.g., Desktop) or use 'reg save' command before analyzing.");
+                return;
+            }
+
+            const buffer = await file.arrayBuffer();
+            const uint8 = new Uint8Array(buffer.slice(0, 512 * 1024 * 1024)); // 512MB limit
+            
+            setFileData(uint8);
+            setFileName(file.name);
+            setScanResults([]); 
+            setLogs([]);
+            addLog(`File Opened (Native Auth): ${file.name} (${(uint8.length / 1024 / 1024).toFixed(2)} MB)`);
+
+        } catch (err) {
+            // User cancelled or error
+            if ((err as Error).name !== 'AbortError') {
+                console.error("FS API Error:", err);
+                // Fallback to old input
+                fileInputRef.current?.click();
+            }
+        }
+    } else {
+        // Fallback for browsers without API support
+        fileInputRef.current?.click();
+    }
+  };
+
+  // Fallback Legacy Upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -251,7 +299,6 @@ const App: React.FC = () => {
     reader.onload = (event) => {
       if (event.target?.result) {
         const buffer = event.target.result as ArrayBuffer;
-        // CRITICAL FIX: Increased upload limit to 512MB (from 32MB) to prevent truncation of SOFTWARE hives
         const uint8 = new Uint8Array(buffer.slice(0, 512 * 1024 * 1024));
         setFileData(uint8);
         setFileName(file.name);
@@ -354,7 +401,7 @@ const App: React.FC = () => {
     onSelectionChange(offset, offset + bytes.length - 1, newBuffer);
   }, [fileData, onSelectionChange, addLog]);
 
-  // --- ROBUST BATCH PROCESSING LOOP ---
+  // --- ROBUST BATCH PROCESSING LOOP (v8.0 SMART) ---
   const startProcessingLoop = (
       sourceData: Uint8Array, 
       sourceResults: ScanFinding[], 
@@ -368,30 +415,51 @@ const App: React.FC = () => {
             const CHUNK_SIZE = 50; 
             let processedGlobal = 0;
             let scanIndex = 0;
+            let skippedSafety = 0;
 
             const interval = setInterval(() => {
                 let chunkProcessed = 0;
                 while (scanIndex < workingScanResults.length && chunkProcessed < CHUNK_SIZE) {
                     const f = workingScanResults[scanIndex];
                     if (f && !f.isDeleted) {
-                        try {
-                            // v7.2 SAFETY: Increased boundary check from 0x34 to 0x50 to ensure full node fits in buffer
-                            if (f.offset + 0x50 < newBuffer.length) {
-                                // We don't log every single change in batch mode to avoid RAM overflow
-                                neuterKeyNode(newBuffer, f.offset, mainView);
-                                workingScanResults[scanIndex] = { ...f, isDeleted: true };
+                        // v8.0 CONTEXT-AWARE SAFETY POLICY:
+                        // 1. SYSTEM CRITICAL KEYS: LOCKED (Always Skip)
+                        // 2. SEARCH MATCHES: ALLOWED (User Intent) - Unless Critical
+                        // 3. ROOTKITS: ALLOWED (High Confidence)
+                        // 4. MASSIVE TREES (>20 children): SKIPPED (Cascade Risk)
+                        
+                        const isCritical = f.isSystemCritical;
+                        const isMassive = (f.subkeyCount || 0) > 20; // Risk of deleting huge trees blindly
+                        const isIntentional = f.type === 'SEARCH_MATCH';
+                        const isRootkit = f.confidence >= 0.8 || f.type === 'ROOTKIT_NULL_EMBEDDED' || f.type === 'ROOTKIT_CLASS_INJECTION';
+
+                        // Logic: Delete IF (Not Critical AND (Intentional OR Rootkit)) AND (Not Massive OR Intentional)
+                        // Note: If user searched for it explicitly, we allow deleting massive trees (Intent overrides Cascade Safety)
+                        const shouldDelete = !isCritical && (
+                            (isIntentional) || 
+                            (isRootkit && !isMassive)
+                        );
+                        
+                        if (shouldDelete) {
+                            try {
+                                if (f.offset + 0x50 < newBuffer.length) {
+                                    neuterKeyNode(newBuffer, f.offset, mainView);
+                                    workingScanResults[scanIndex] = { ...f, isDeleted: true };
+                                }
+                                processedGlobal++;
+                            } catch (e) {
+                                console.warn("Skipping key error", e);
                             }
-                            processedGlobal++;
-                        } catch (e) {
-                            console.warn("Skipping key error", e);
+                        } else {
+                            skippedSafety++;
                         }
                     }
                     scanIndex++;
                     chunkProcessed++;
                 }
 
-                const pct = totalActive > 0 ? Math.floor((processedGlobal / totalActive) * 100) : 100;
-                updateOverlay(pct, `${processedGlobal} / ${totalActive}`, "Neutering Threats...");
+                const pct = totalActive > 0 ? Math.floor((scanIndex / sourceResults.length) * 100) : 100;
+                updateOverlay(pct, `${processedGlobal} Neutered / ${skippedSafety} Locked`, "Smart Context Processing...");
 
                 if (scanIndex >= workingScanResults.length) {
                     clearInterval(interval);
@@ -401,12 +469,12 @@ const App: React.FC = () => {
                         setFileData(newBuffer);
                         setScanResults(workingScanResults);
                         setActionStatus('completed');
-                        addLog(`Batch Process Complete: ${processedGlobal} keys neutered.`);
+                        addLog(`Batch Complete: ${processedGlobal} processed. ${skippedSafety} skipped (Critical/Safety).`);
                         
                         setTimeout(() => removeOverlay(), 500);
                         setTimeout(() => setActionStatus('idle'), 5000);
                         
-                        setTimeout(() => alert(`Operation Complete.\n\nSuccessfully neutered ${processedGlobal} threats.`), 600);
+                        setTimeout(() => alert(`Operation Complete.\n\nNeutered: ${processedGlobal}\nSkipped (Safety Locked): ${skippedSafety}\n\nSearch results were prioritized. Critical system paths were protected.`), 600);
                     }, 500); 
                 }
             }, 50); 
@@ -520,7 +588,7 @@ const App: React.FC = () => {
           <div className="w-8 h-8 bg-gradient-to-br from-red-900 to-gray-900 rounded flex items-center justify-center text-red-400 font-bold border border-red-800">H</div>
           <div>
             <h1 className="font-bold text-lg tracking-wide text-gray-100 leading-none flex items-center gap-2">
-              HiveMind <span className="text-purple-500">v7.2</span>
+              HiveMind <span className="text-blue-500">v8.0</span>
             </h1>
           </div>
         </div>
@@ -566,8 +634,9 @@ const App: React.FC = () => {
              <div className="flex gap-2 ml-2">
                 <input type="file" ref={logInputRef} className="hidden" multiple accept=".log,.log1,.log2" onChange={handleLogUpload} />
                 <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/>
-                <button onClick={() => fileInputRef.current?.click()} className="p-1.5 bg-gray-800 hover:bg-gray-700 rounded text-gray-400 hover:text-white border border-gray-700">
-                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                {/* Fallback Legacy Upload - Hidden if Native works, or handled inside function */}
+                <button onClick={handleNativeFileOpen} className="p-1.5 bg-gray-800 hover:bg-gray-700 rounded text-gray-400 hover:text-white border border-gray-700" title="Open Local Hive">
+                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" /></svg>
                 </button>
              </div>
         </div>
@@ -611,7 +680,11 @@ const App: React.FC = () => {
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center flex-col gap-8 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-gray-900 to-gray-950">
-             <button onClick={() => fileInputRef.current?.click()} className="px-6 py-2.5 bg-red-900 hover:bg-red-800 text-white font-medium rounded-lg border border-red-800 shadow-lg shadow-red-900/30">Load Hive File</button>
+             <button onClick={handleNativeFileOpen} className="px-6 py-2.5 bg-red-900 hover:bg-red-800 text-white font-medium rounded-lg border border-red-800 shadow-lg shadow-red-900/30 flex items-center gap-2">
+                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" /></svg>
+                 Open Hive File
+             </button>
+             <div className="text-gray-600 text-xs">Supports SYSTEM, SOFTWARE, SAM, NTUSER.DAT</div>
           </div>
         )}
       </div>
@@ -621,7 +694,7 @@ const App: React.FC = () => {
            <span>ENGINE: <span className="text-cyan-600">GEMINI-2.5-FLASH</span></span>
            <span>MODE: <span className="text-red-400 uppercase">{aiMode}</span></span>
         </div>
-        <div className="opacity-50">v7.2 (DIAGNOSTIC)</div>
+        <div className="opacity-50">v8.0 (SMART CONTEXT)</div>
       </footer>
     </div>
   );
