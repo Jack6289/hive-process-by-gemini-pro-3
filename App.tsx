@@ -375,7 +375,8 @@ const App: React.FC = () => {
                     const f = workingScanResults[scanIndex];
                     if (f && !f.isDeleted) {
                         try {
-                            if (f.offset + 0x34 < newBuffer.length) {
+                            // v7.2 SAFETY: Increased boundary check from 0x34 to 0x50 to ensure full node fits in buffer
+                            if (f.offset + 0x50 < newBuffer.length) {
                                 // We don't log every single change in batch mode to avoid RAM overflow
                                 neuterKeyNode(newBuffer, f.offset, mainView);
                                 workingScanResults[scanIndex] = { ...f, isDeleted: true };
@@ -519,7 +520,7 @@ const App: React.FC = () => {
           <div className="w-8 h-8 bg-gradient-to-br from-red-900 to-gray-900 rounded flex items-center justify-center text-red-400 font-bold border border-red-800">H</div>
           <div>
             <h1 className="font-bold text-lg tracking-wide text-gray-100 leading-none flex items-center gap-2">
-              HiveMind <span className="text-purple-500">v7.1</span>
+              HiveMind <span className="text-purple-500">v7.2</span>
             </h1>
           </div>
         </div>
@@ -620,7 +621,7 @@ const App: React.FC = () => {
            <span>ENGINE: <span className="text-cyan-600">GEMINI-2.5-FLASH</span></span>
            <span>MODE: <span className="text-red-400 uppercase">{aiMode}</span></span>
         </div>
-        <div className="opacity-50">v7.1 (DIAGNOSTIC)</div>
+        <div className="opacity-50">v7.2 (DIAGNOSTIC)</div>
       </footer>
     </div>
   );

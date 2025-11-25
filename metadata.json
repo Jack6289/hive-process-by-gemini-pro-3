@@ -1,5 +1,5 @@
 {
   "name": "HiveMind Forensics",
-  "description": "v7.1 CRITICAL FIX: Increased file upload limit from 32MB to 512MB to prevent truncation of large SOFTWARE/SYSTEM hives.",
+  "description": "v7.2 Stable: Unified Single/Batch kernel-safe logic boundaries.",
   "requestFramePermissions": []
 }
