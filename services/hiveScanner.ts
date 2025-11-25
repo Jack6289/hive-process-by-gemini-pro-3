@@ -78,6 +78,18 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
 
   // v3.1 Active Logic: Build Reachability Map to find DKOM keys
   const reachableOffsets = graph.buildReachabilityMap();
+  const rootOffset = graph.getRootOffset(); // Get Root Key Offset for Protection
+
+  // SAFETY CIRCUIT BREAKER:
+  // If we only found a handful of reachable keys in a large file, the tree walk likely failed.
+  // In this case, flagging everything else as "Unlinked" is a False Positive.
+  // We disable DKOM detection if reachable count is suspicious (< 0.1% of estimated keys or absolute low).
+  const estimatedKeys = len / 0x100; // Crude estimate
+  const isTreeWalkSuspect = reachableOffsets.size < 50 && len > 0x10000; 
+  
+  if (isTreeWalkSuspect) {
+      console.warn("Hive Scanner Warning: Reachability Map too small. Disabling DKOM to prevent false positives.");
+  }
 
   // OPTIMIZATION: Scan in 8-byte alignment steps.
   // Registry cells are 8-byte aligned relative to bin start.
@@ -90,6 +102,12 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
     if (cursor >= 4) {
        const cellSize = view.getInt32(cursor - 4, true);
        allocationStatus = cellSize < 0 ? 'Allocated' : 'Free';
+    }
+
+    // PROTECT ROOT KEY: Never flag the root key
+    if (cursor === rootOffset) {
+        cursor += 8;
+        continue;
     }
 
     if (sig === SIG_DESTROYED) {
@@ -154,7 +172,8 @@ export const scanHiveForAnomalies = (data: Uint8Array): ScanFinding[] => {
         }
 
         // 3. UNLINKED / DKOM (v3.1 Active Check)
-        else if (!reachableOffsets.has(cursor) && allocationStatus === 'Allocated') {
+        // CHECK SAFETY BREAKER FIRST
+        else if (!isTreeWalkSuspect && !reachableOffsets.has(cursor) && allocationStatus === 'Allocated') {
              // Key exists, is marked allocated, has valid header, but tree walk didn't find it.
              type = 'ROOTKIT_UNLINKED_DKOM';
              desc = "DKOM Detected: Key exists in binary but is unlinked from Registry Tree.";

@@ -1,5 +1,5 @@
 {
   "name": "HiveMind Forensics",
-  "description": "v6.0 CRITICAL FIX: Implemented Kernel-Safe Neutering (Preserves ACLs) and Header Checksum Repair to prevent Win10 Boot Loops.",
+  "description": "v7.1 CRITICAL FIX: Increased file upload limit from 32MB to 512MB to prevent truncation of large SOFTWARE/SYSTEM hives.",
   "requestFramePermissions": []
 }

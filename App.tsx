@@ -6,60 +6,93 @@ import { scanHiveForAnomalies, searchHive } from './services/hiveScanner';
 import { reconcileMultipleLogs, ReconcileResult } from './services/logReconciler';
 import { ScanFinding } from './types';
 
-// --- CRITICAL KERNEL-SAFE UTILITIES (v6.0) ---
+// --- CRITICAL KERNEL-SAFE UTILITIES (v7.1) ---
 
-// 1. Kernel-Safe Neuter: DO NOT touch Security (0x2C) or Class (0x30)
-// Modifying 0x2C to -1 causes "Invalid Security Descriptor" BugCheck on boot.
-const neuterKeyNode = (buffer: Uint8Array, offset: number, providedView?: DataView) => {
+// 1. Kernel-Safe Neuter with DIFF LOGGING
+const neuterKeyNode = (buffer: Uint8Array, offset: number, providedView?: DataView): string[] => {
     const view = providedView || new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-    
-    // A. Update Timestamp (Last Write Time) to NOW. 
-    // Windows checks consistency here. 
-    // Format: FILETIME (100ns intervals since 1601-01-01)
-    // 11644473600000 is the offset in milliseconds between 1601 and 1970.
+    const changes: string[] = [];
+
+    // Helper to log changes
+    const logChange = (field: string, oldVal: any, newVal: any) => {
+        changes.push(`[NEUTER] Offset 0x${offset.toString(16)}: ${field} ${oldVal} -> ${newVal}`);
+    };
+
+    // A. Update Timestamp
+    const oldTime = view.getBigUint64(offset + 0x04, true);
     const nowMs = BigInt(Date.now());
     const fileTime = (nowMs + 11644473600000n) * 10000n; 
     view.setBigUint64(offset + 0x04, fileTime, true);
+    // logChange("Timestamp", oldTime, fileTime);
 
-    // B. Clear Subkeys (Safe)
-    view.setUint32(offset + 0x14, 0, true); // Subkey Count Stable
-    view.setUint32(offset + 0x18, 0, true); // Subkey Count Volatile
-    view.setInt32(offset + 0x1C, -1, true); // Subkey List Offset
-    view.setInt32(offset + 0x20, -1, true); // Volatile Subkey List Offset
+    // B. Clear Subkeys
+    const oldSubCount = view.getUint32(offset + 0x14, true);
+    view.setUint32(offset + 0x14, 0, true); 
+    if(oldSubCount !== 0) logChange("SubkeyCount", oldSubCount, 0);
 
-    // C. Clear Values (Safe)
-    view.setUint32(offset + 0x24, 0, true); // Value Count
-    view.setInt32(offset + 0x28, -1, true); // Value List Offset
+    view.setUint32(offset + 0x18, 0, true); 
+    view.setInt32(offset + 0x1C, -1, true); 
+    view.setInt32(offset + 0x20, -1, true); 
+
+    // C. Clear Values
+    const oldValCount = view.getUint32(offset + 0x24, true);
+    view.setUint32(offset + 0x24, 0, true); 
+    if(oldValCount !== 0) logChange("ValueCount", oldValCount, 0);
+
+    view.setInt32(offset + 0x28, -1, true); 
+
+    // E. v6.1 CRITICAL FIX: Zero out Max Length Statistics
+    view.setUint32(offset + 0x34, 0, true); 
+    view.setUint32(offset + 0x38, 0, true); 
+    view.setUint32(offset + 0x3C, 0, true); 
+    view.setUint32(offset + 0x40, 0, true); 
     
-    // D. DO NOT TOUCH Security (0x2C) or Class (0x30)
-    // view.setInt32(offset + 0x2C, -1, true); // <--- CAUSES BOOT LOOP
-    // view.setInt32(offset + 0x30, -1, true); // <--- CAUSES BOOT LOOP
+    return changes;
 };
 
-// 2. Fix Header Checksum
-// Windows Bootloader checks the XOR sum of the first 511 DWORDs in the base block.
-// If we modify the body without updating this (or the timestamp in base block), it may panic.
-const fixHiveHeader = (buffer: Uint8Array) => {
-    if (buffer.length < 0x1000) return;
+// 2. Fix Hive Header & Sync Sequences & LENGTH (v7.0 STRICT)
+const fixHiveHeader = (buffer: Uint8Array): string[] => {
+    const logs: string[] = [];
+    if (buffer.length < 0x1000) return ["ERROR: File too small"];
+    
     const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     
-    // Check Signature 'regf'
-    if (view.getUint32(0, true) !== 0x66676572) return;
+    if (view.getUint32(0, true) !== 0x66676572) return ["ERROR: Invalid Signature"];
 
-    // Update Base Block Timestamp
+    // A. Update Base Block Timestamp
     const nowMs = BigInt(Date.now());
     const fileTime = (nowMs + 11644473600000n) * 10000n; 
     view.setBigUint64(0x0C, fileTime, true);
 
-    // Recalculate XOR Checksum (Offset 0x1FC)
-    // XOR sum of the first 0x1FF bytes (0x00 to 0x1FB treated as DWORDS)
+    // B. Sync Sequence Numbers
+    const seq = view.getUint32(0x04, true);
+    view.setUint32(0x04, seq + 1, true); 
+    view.setUint32(0x08, seq + 1, true); 
+    logs.push(`[HEADER] Sequence bumped to ${seq + 1}`);
+
+    // C. v6.4 FIX: Update File Length Header (Offset 0x28)
+    const dataLength = buffer.length - 0x1000;
+    const oldLen = view.getUint32(0x28, true);
+    view.setUint32(0x28, dataLength, true);
+    if(oldLen !== dataLength) logs.push(`[HEADER] Length corrected: ${oldLen} -> ${dataLength}`);
+
+    // D. Recalculate XOR Checksum
+    // v7.0: ZERO OUT CHECKSUM FIELD FIRST
+    view.setUint32(0x1FC, 0, true); 
+    
     let xorSum = 0;
+    // Iterate 0 to 0x1FF (511), step 4. 
+    // 0x1FC is the last u32 (bytes 508-511).
+    // Loop i < 0x1FC means we stop at 504.
     for (let i = 0; i < 0x1FC; i += 4) {
         xorSum ^= view.getUint32(i, true);
     }
     
     view.setUint32(0x1FC, xorSum, true);
-    console.log("Hive Header Checksum Repaired: " + xorSum.toString(16));
+    // Fix: Display as unsigned hex
+    logs.push(`[HEADER] New Checksum: 0x${(xorSum >>> 0).toString(16).toUpperCase()}`);
+    
+    return logs;
 };
 
 // --- VANILLA DOM OVERLAY HELPERS ---
@@ -124,30 +157,43 @@ const removeOverlay = () => {
 };
 
 // --- CUSTOM CONFIRMATION MODAL ---
-const ConfirmationModal = ({ count, onConfirm, onCancel }: { count: number, onConfirm: () => void, onCancel: () => void }) => (
-  <div className="fixed inset-0 z-[10001] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-    <div className="bg-gray-900 border border-red-900/50 rounded-xl p-6 max-w-md w-full shadow-2xl transform transition-all scale-100 animate-in fade-in zoom-in duration-200">
-      <h3 className="text-xl font-bold text-red-500 mb-4 flex items-center gap-2">
-        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-        Confirm Mass Action
-      </h3>
-      <p className="text-gray-300 mb-6 text-sm leading-relaxed">
-        You are about to forcefully neuter <strong className="text-white">{count}</strong> detected threats. 
-        This action modifies the in-memory hive structure by zeroing out subkey lists and values.
-        <br/><br/>
-        <span className="text-red-400 text-xs">This cannot be undone for the current session.</span>
-      </p>
-      <div className="flex gap-3 justify-end">
-        <button onClick={onCancel} className="px-4 py-2 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 text-xs font-bold uppercase tracking-wide transition-colors">
-          Cancel
-        </button>
-        <button onClick={onConfirm} className="px-4 py-2 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-bold uppercase tracking-wide shadow-lg shadow-red-900/50 transition-colors">
-          Yes, Neuter All
-        </button>
+const ConfirmationModal = ({ count, onConfirm, onCancel }: { count: number, onConfirm: () => void, onCancel: () => void }) => {
+  const isMassDestruction = count > 100;
+
+  return (
+    <div className="fixed inset-0 z-[10001] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className={`bg-gray-900 border rounded-xl p-6 max-w-md w-full shadow-2xl transform transition-all scale-100 animate-in fade-in zoom-in duration-200 ${isMassDestruction ? 'border-red-600 shadow-red-900/20' : 'border-gray-800'}`}>
+        <h3 className={`text-xl font-bold mb-4 flex items-center gap-2 ${isMassDestruction ? 'text-red-500' : 'text-cyan-500'}`}>
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+          {isMassDestruction ? 'CRITICAL SAFETY WARNING' : 'Confirm Action'}
+        </h3>
+        <p className="text-gray-300 mb-6 text-sm leading-relaxed">
+          You are about to neuter <strong className="text-white">{count}</strong> detected threats. 
+          <br/><br/>
+          {isMassDestruction && (
+              <div className="bg-red-950/50 border border-red-900 p-3 rounded mb-4 text-red-200 text-xs">
+                  <strong>POTENTIAL FALSE POSITIVE:</strong> 
+                  <br/>
+                  Deleting {count} keys will likely destroy your operating system. The scanner may have failed to map the hive correctly. 
+                  <br/><br/>
+                  <strong>DO NOT PROCEED</strong> unless you are absolutely certain these are malicious.
+              </div>
+          )}
+          <span className="text-yellow-400 font-bold text-xs uppercase block mb-2">⚠ Boot Safety Warning</span>
+          When replacing the hive file in Windows/System32/config, you <strong className="text-white">MUST DELETE or RENAME</strong> the associated <code>.LOG1</code> and <code>.LOG2</code> files.
+        </p>
+        <div className="flex gap-3 justify-end">
+          <button onClick={onCancel} className="px-4 py-2 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 text-xs font-bold uppercase tracking-wide transition-colors">
+            Cancel
+          </button>
+          <button onClick={onConfirm} className={`px-4 py-2 rounded text-white text-xs font-bold uppercase tracking-wide shadow-lg transition-colors ${isMassDestruction ? 'bg-red-700 hover:bg-red-800 shadow-red-900/50' : 'bg-cyan-700 hover:bg-cyan-800 shadow-cyan-900/50'}`}>
+            {isMassDestruction ? 'I UNDERSTAND THE RISKS' : 'Yes, Neuter All'}
+          </button>
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 const App: React.FC = () => {
   const [fileData, setFileData] = useState<Uint8Array | null>(null);
@@ -158,6 +204,7 @@ const App: React.FC = () => {
   const [isScanning, setIsScanning] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [reconcileStats, setReconcileStats] = useState<ReconcileResult | null>(null);
+  const [logs, setLogs] = useState<string[]>([]);
   
   // Confirmation Modal State
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -175,6 +222,11 @@ const App: React.FC = () => {
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const logInputRef = useRef<HTMLInputElement>(null);
+
+  const addLog = useCallback((msg: string) => {
+    const time = new Date().toLocaleTimeString();
+    setLogs(prev => [`[${time}] ${msg}`, ...prev]);
+  }, []);
 
   const onSelectionChange = useCallback((start: number, end: number, customBuffer?: Uint8Array) => {
     const buffer = customBuffer || fileData;
@@ -199,11 +251,13 @@ const App: React.FC = () => {
     reader.onload = (event) => {
       if (event.target?.result) {
         const buffer = event.target.result as ArrayBuffer;
-        const uint8 = new Uint8Array(buffer.slice(0, 32 * 1024 * 1024));
+        // CRITICAL FIX: Increased upload limit to 512MB (from 32MB) to prevent truncation of SOFTWARE hives
+        const uint8 = new Uint8Array(buffer.slice(0, 512 * 1024 * 1024));
         setFileData(uint8);
         setFileName(file.name);
         setScanResults([]); 
-        console.log("File Loaded: " + file.name);
+        setLogs([]);
+        addLog("File Loaded: " + file.name + " (" + (uint8.length / 1024 / 1024).toFixed(2) + " MB)");
       }
     };
     reader.readAsArrayBuffer(file);
@@ -228,8 +282,9 @@ const App: React.FC = () => {
         const result = reconcileMultipleLogs(fileData, logs);
         setFileData(result.patchedBuffer);
         setReconcileStats(result);
-        setScanResults([]); // CRITICAL: Clear scan results as offsets are now invalid
-        alert(`Logs Applied Successfully.\n\nPatches: ${result.patchesApplied}\nExpanded: ${result.bytesExpanded} bytes\nNew Version: ${result.logVersion}\n\nPlease re-scan to find new or modified keys.`);
+        setScanResults([]); 
+        addLog(`Logs Merged: ${result.logsProcessed}, Seq: ${result.finalSequence}`);
+        alert(`Logs Applied Successfully.\n\nPatches: ${result.patchesApplied}\nExpanded: ${result.bytesExpanded} bytes\nFiles Merged: ${result.logsProcessed}\nFinal Seq: ${result.finalSequence}\n\nPlease re-scan to find new or modified keys.`);
       } catch (err) {
         alert("Log Replay Failed: " + err);
       }
@@ -240,13 +295,14 @@ const App: React.FC = () => {
       if (!fileData || !searchQuery) return;
       const findings = searchHive(fileData, searchQuery);
       setScanResults(findings);
+      addLog(`Search '${searchQuery}' found ${findings.length} matches`);
       if (findings.length > 0) {
           const f = findings[0];
           onSelectionChange(f.offset, f.offset + f.length - 1);
       } else {
           alert(`No matches found for "${searchQuery}"`);
       }
-  }, [fileData, searchQuery, onSelectionChange]);
+  }, [fileData, searchQuery, onSelectionChange, addLog]);
 
   const handleSearchKey = (e: React.KeyboardEvent) => {
       if (e.key === 'Enter') performSearch();
@@ -255,16 +311,18 @@ const App: React.FC = () => {
   const performScan = useCallback(() => {
     if (!fileData) return;
     setIsScanning(true);
+    addLog("Starting Scan...");
     setTimeout(() => {
       const findings = scanHiveForAnomalies(fileData);
       setScanResults(findings);
       setIsScanning(false);
+      addLog(`Scan Complete: ${findings.length} findings`);
       if (findings.length > 0) {
           const f = findings[0];
           onSelectionChange(f.offset, f.offset + f.length - 1);
       }
     }, 100);
-  }, [fileData, onSelectionChange]);
+  }, [fileData, onSelectionChange, addLog]);
 
   const handleSelectFinding = useCallback((finding: ScanFinding) => {
     onSelectionChange(finding.offset, finding.offset + finding.length - 1);
@@ -279,19 +337,22 @@ const App: React.FC = () => {
   const handleDeleteKey = useCallback((finding: ScanFinding) => {
     if (!fileData) return;
     const newBuffer = new Uint8Array(fileData); 
-    neuterKeyNode(newBuffer, finding.offset);
+    const changes = neuterKeyNode(newBuffer, finding.offset);
+    changes.forEach(c => addLog(c));
+    
     setFileData(newBuffer);
     setScanResults(prev => prev.map(f => f.id === finding.id ? { ...f, isDeleted: true } : f));
     onSelectionChange(finding.offset, finding.offset + finding.length - 1, newBuffer);
-  }, [fileData, onSelectionChange]);
+  }, [fileData, onSelectionChange, addLog]);
 
   const handlePatchBytes = useCallback((offset: number, bytes: Uint8Array) => {
     if (!fileData) return;
     const newBuffer = new Uint8Array(fileData);
     newBuffer.set(bytes, offset);
     setFileData(newBuffer);
+    addLog(`Manual Patch at 0x${offset.toString(16)} (${bytes.length} bytes)`);
     onSelectionChange(offset, offset + bytes.length - 1, newBuffer);
-  }, [fileData, onSelectionChange]);
+  }, [fileData, onSelectionChange, addLog]);
 
   // --- ROBUST BATCH PROCESSING LOOP ---
   const startProcessingLoop = (
@@ -315,6 +376,7 @@ const App: React.FC = () => {
                     if (f && !f.isDeleted) {
                         try {
                             if (f.offset + 0x34 < newBuffer.length) {
+                                // We don't log every single change in batch mode to avoid RAM overflow
                                 neuterKeyNode(newBuffer, f.offset, mainView);
                                 workingScanResults[scanIndex] = { ...f, isDeleted: true };
                             }
@@ -338,6 +400,7 @@ const App: React.FC = () => {
                         setFileData(newBuffer);
                         setScanResults(workingScanResults);
                         setActionStatus('completed');
+                        addLog(`Batch Process Complete: ${processedGlobal} keys neutered.`);
                         
                         setTimeout(() => removeOverlay(), 500);
                         setTimeout(() => setActionStatus('idle'), 5000);
@@ -393,12 +456,40 @@ const App: React.FC = () => {
       }, 100);
   }, [batchNeuterCount]);
 
+  const verifyIntegrity = () => {
+      if (!fileData) return;
+      
+      addLog("Starting Integrity Verification...");
+      const view = new DataView(fileData.buffer, fileData.byteOffset, fileData.byteLength);
+      
+      const sig = view.getUint32(0, true);
+      const isSigValid = sig === 0x66676572;
+      addLog(`Signature: ${isSigValid ? 'OK' : 'FAIL'} (0x${sig.toString(16)})`);
+
+      const lenHeader = view.getUint32(0x28, true);
+      const expectedLen = fileData.length - 0x1000;
+      const isLenValid = lenHeader === expectedLen;
+      addLog(`Length Header: 0x${lenHeader.toString(16)} (File: 0x${expectedLen.toString(16)}) - ${isLenValid ? 'OK' : 'MISMATCH'}`);
+
+      const seq1 = view.getUint32(0x04, true);
+      const seq2 = view.getUint32(0x08, true);
+      const isSeqValid = seq1 === seq2;
+      addLog(`Sequence: ${seq1} vs ${seq2} - ${isSeqValid ? 'OK' : 'MISMATCH (DIRTY)'}`);
+
+      if (!isSigValid || !isLenValid) {
+          alert("CRITICAL INTEGRITY FAILURE.\n\nFile is corrupt and WILL BOOT LOOP Windows.\nCheck diagnostic log below.");
+      } else {
+          alert(`Integrity OK.\n\nSeq: ${seq1}\nSize: ${fileData.length} bytes\n\nReady for Download.`);
+      }
+  };
+
   const handleDownload = () => {
     if (!fileData) return;
     
-    // v6.0: Fix Header Checksum before download to ensure boot integrity
+    // v6.4 FIX: Fix Header Checksum, Sequence AND LENGTH
     const newBuffer = new Uint8Array(fileData);
-    fixHiveHeader(newBuffer);
+    const logs = fixHiveHeader(newBuffer);
+    logs.forEach(l => addLog(l));
 
     const blob = new Blob([newBuffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob as Blob);
@@ -428,7 +519,7 @@ const App: React.FC = () => {
           <div className="w-8 h-8 bg-gradient-to-br from-red-900 to-gray-900 rounded flex items-center justify-center text-red-400 font-bold border border-red-800">H</div>
           <div>
             <h1 className="font-bold text-lg tracking-wide text-gray-100 leading-none flex items-center gap-2">
-              HiveMind <span className="text-green-500">v6.0</span>
+              HiveMind <span className="text-purple-500">v7.1</span>
             </h1>
           </div>
         </div>
@@ -457,6 +548,9 @@ const App: React.FC = () => {
         <div className="flex items-center gap-4">
              {fileData && (
                <>
+                 <button onClick={verifyIntegrity} className="px-3 py-1.5 bg-purple-900/20 hover:bg-purple-900/40 text-purple-400 border border-purple-900/50 text-xs font-bold rounded uppercase tracking-wide">
+                   Verify Hive
+                 </button>
                  <button onClick={() => logInputRef.current?.click()} className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 text-xs font-bold rounded uppercase tracking-wide">
                    Load Logs
                  </button>
@@ -486,7 +580,7 @@ const App: React.FC = () => {
                    <span className="text-gray-500 font-mono">OFFSET: {selectionOffset.toString(16).toUpperCase()}</span>
                    <span className={scanResults.length > 0 ? "text-red-400 font-bold" : ""}>{scanResults.length} THREATS</span>
                    {reconcileStats && (
-                       <span className="text-green-500 ml-auto">LOGS REPLAYED: {reconcileStats.logVersion}</span>
+                       <span className="text-green-500 ml-auto">LOGS MERGED: {reconcileStats.logsProcessed} (SEQ: {reconcileStats.finalSequence})</span>
                    )}
                 </div>
                 <div className="flex-1 overflow-hidden relative">
@@ -495,6 +589,17 @@ const App: React.FC = () => {
                      selectedStart={selectionRange?.start ?? null} selectedEnd={selectionRange?.end ?? null}
                    />
                 </div>
+                
+                {/* v7.0 DIAGNOSTIC TERMINAL (RESTORED) */}
+                <div className="h-32 bg-black border-t border-gray-800 p-2 overflow-y-auto font-mono text-[10px] text-green-400 opacity-90 z-30">
+                   <div className="flex justify-between border-b border-gray-800 mb-1 pb-1 text-gray-500">
+                      <span>DIAGNOSTIC & DIFF LOG</span>
+                      <button onClick={() => setLogs([])} className="hover:text-white">CLEAR</button>
+                   </div>
+                   {logs.length === 0 && <div className="text-gray-600 italic">Ready.</div>}
+                   {logs.map((l, i) => <div key={i}>{l}</div>)}
+                </div>
+
             </div>
             <AnalysisPanel 
               selectedBytes={selectedBytes} selectionOffset={selectionOffset} scanResults={scanResults}
@@ -515,7 +620,7 @@ const App: React.FC = () => {
            <span>ENGINE: <span className="text-cyan-600">GEMINI-2.5-FLASH</span></span>
            <span>MODE: <span className="text-red-400 uppercase">{aiMode}</span></span>
         </div>
-        <div className="opacity-50">v6.0 (SAFE KERNEL)</div>
+        <div className="opacity-50">v7.1 (DIAGNOSTIC)</div>
       </footer>
     </div>
   );

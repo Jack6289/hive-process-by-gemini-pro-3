@@ -6,7 +6,8 @@ export interface ReconcileResult {
   patchedBuffer: Uint8Array;
   patchesApplied: number;
   bytesExpanded: number;
-  logVersion: number;
+  finalSequence: number;
+  logsProcessed: number;
 }
 
 export const getLogSequenceNumber = (logData: Uint8Array): number => {
@@ -33,7 +34,9 @@ export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): Reconci
   if (logView.getUint32(0, true) !== 0x66676572) {
     throw new Error("Invalid Log Signature");
   }
-  const logVersion = logView.getUint32(0x14, true);
+  
+  // Offset 0x04 is the Sequence Number (not version)
+  const sequence = logView.getUint32(0x04, true);
 
   // 2. Iterate Log Entries
   // Valid logs are a sequence of Hive Bins (hbin) starting at 0x1000.
@@ -52,7 +55,7 @@ export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): Reconci
       // If we see unaligned sizes, it's likely garbage or partial writes. 
       // Applying these would corrupt the hbin chain and crash Regedit.
       if (size === 0 || size % 4096 !== 0) {
-          console.warn(`Stopping log replay at unaligned block (Potential Corruption). Offset: 0x${cursor.toString(16)}, Size: ${size}`);
+          // console.warn(`Stopping log replay at unaligned block (Potential Corruption). Offset: 0x${cursor.toString(16)}, Size: ${size}`);
           break; 
       }
 
@@ -109,7 +112,8 @@ export const reconcileLog = (mainHive: Uint8Array, logData: Uint8Array): Reconci
     patchedBuffer: buffer,
     patchesApplied: patches,
     bytesExpanded: expansion > 0 ? expansion : 0,
-    logVersion: logVersion
+    finalSequence: sequence,
+    logsProcessed: 1
   };
 };
 
@@ -124,14 +128,16 @@ export const reconcileMultipleLogs = (mainHive: Uint8Array, logs: Uint8Array[]):
 
   let currentBuffer = mainHive;
   let totalPatches = 0;
-  let finalVersion = 0;
+  let lastSeq = 0;
+  let processedCount = 0;
 
   for (const logEntry of mappedLogs) {
     if (logEntry.seq === 0) continue; 
     const result = reconcileLog(currentBuffer, logEntry.data);
     currentBuffer = result.patchedBuffer;
     totalPatches += result.patchesApplied;
-    finalVersion = result.logVersion;
+    lastSeq = result.finalSequence;
+    processedCount++;
   }
 
   const totalExpansion = currentBuffer.length - mainHive.length;
@@ -140,6 +146,7 @@ export const reconcileMultipleLogs = (mainHive: Uint8Array, logs: Uint8Array[]):
     patchedBuffer: currentBuffer,
     patchesApplied: totalPatches,
     bytesExpanded: totalExpansion > 0 ? totalExpansion : 0,
-    logVersion: finalVersion
+    finalSequence: lastSeq,
+    logsProcessed: processedCount
   };
 };

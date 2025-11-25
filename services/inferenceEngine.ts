@@ -74,12 +74,16 @@ export class HiveGraph {
     return null;
   }
 
+  public getRootOffset(): number | null {
+      const rootCellIndex = this.view.getUint32(0x24, true);
+      return this.resolveCellOffset(rootCellIndex);
+  }
+
   // v3.1: Build a set of all offsets reachable from the Root Key.
   // Any KeyNode (nk) NOT in this set is likely an Unlinked DKOM artifact.
   public buildReachabilityMap(): Set<number> {
     const reachable = new Set<number>();
-    const rootCellIndex = this.view.getUint32(0x24, true); // Root Cell Index from Base Block
-    const rootOffset = this.resolveCellOffset(rootCellIndex);
+    const rootOffset = this.getRootOffset();
 
     if (rootOffset) {
       this.traverseTree(rootOffset, reachable);
