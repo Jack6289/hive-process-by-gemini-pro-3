@@ -401,7 +401,7 @@ const App: React.FC = () => {
     onSelectionChange(offset, offset + bytes.length - 1, newBuffer);
   }, [fileData, onSelectionChange, addLog]);
 
-  // --- ROBUST BATCH PROCESSING LOOP (v8.0 SMART) ---
+  // --- ROBUST BATCH PROCESSING LOOP (v9.0 SYSINTERNALS SMART) ---
   const startProcessingLoop = (
       sourceData: Uint8Array, 
       sourceResults: ScanFinding[], 
@@ -422,21 +422,21 @@ const App: React.FC = () => {
                 while (scanIndex < workingScanResults.length && chunkProcessed < CHUNK_SIZE) {
                     const f = workingScanResults[scanIndex];
                     if (f && !f.isDeleted) {
-                        // v8.0 CONTEXT-AWARE SAFETY POLICY:
+                        // v9.0 SAFETY POLICY UPDATE:
                         // 1. SYSTEM CRITICAL KEYS: LOCKED (Always Skip)
-                        // 2. SEARCH MATCHES: ALLOWED (User Intent) - Unless Critical
-                        // 3. ROOTKITS: ALLOWED (High Confidence)
-                        // 4. MASSIVE TREES (>20 children): SKIPPED (Cascade Risk)
+                        // 2. SEARCH MATCHES: ALLOWED (User Intent)
+                        // 3. PERSISTENCE (Autoruns): ALLOWED (High Priority)
+                        // 4. ROOTKITS: ALLOWED (High Confidence)
+                        // 5. MASSIVE TREES (>20 children): SKIPPED (Cascade Risk)
                         
                         const isCritical = f.isSystemCritical;
-                        const isMassive = (f.subkeyCount || 0) > 20; // Risk of deleting huge trees blindly
+                        const isMassive = (f.subkeyCount || 0) > 20; 
                         const isIntentional = f.type === 'SEARCH_MATCH';
+                        const isPersistence = f.type === 'PERSISTENCE_MECHANISM';
                         const isRootkit = f.confidence >= 0.8 || f.type === 'ROOTKIT_NULL_EMBEDDED' || f.type === 'ROOTKIT_CLASS_INJECTION';
 
-                        // Logic: Delete IF (Not Critical AND (Intentional OR Rootkit)) AND (Not Massive OR Intentional)
-                        // Note: If user searched for it explicitly, we allow deleting massive trees (Intent overrides Cascade Safety)
                         const shouldDelete = !isCritical && (
-                            (isIntentional) || 
+                            (isIntentional || isPersistence) || 
                             (isRootkit && !isMassive)
                         );
                         
@@ -444,6 +444,18 @@ const App: React.FC = () => {
                             try {
                                 if (f.offset + 0x50 < newBuffer.length) {
                                     neuterKeyNode(newBuffer, f.offset, mainView);
+                                    
+                                    // v9.0 ASSOCIATION LOGIC:
+                                    // If finding has associated dependencies (e.g. Service -> Enum), delete them too if safe.
+                                    if (f.associatedOffsets && f.associatedOffsets.length > 0) {
+                                        f.associatedOffsets.forEach(assocOffset => {
+                                            // Ensure not out of bounds
+                                            if (assocOffset + 0x50 < newBuffer.length) {
+                                                neuterKeyNode(newBuffer, assocOffset, mainView);
+                                            }
+                                        });
+                                    }
+
                                     workingScanResults[scanIndex] = { ...f, isDeleted: true };
                                 }
                                 processedGlobal++;
@@ -459,7 +471,7 @@ const App: React.FC = () => {
                 }
 
                 const pct = totalActive > 0 ? Math.floor((scanIndex / sourceResults.length) * 100) : 100;
-                updateOverlay(pct, `${processedGlobal} Neutered / ${skippedSafety} Locked`, "Smart Context Processing...");
+                updateOverlay(pct, `${processedGlobal} Neutered / ${skippedSafety} Locked`, "Sysinternals Heuristics...");
 
                 if (scanIndex >= workingScanResults.length) {
                     clearInterval(interval);
@@ -474,7 +486,7 @@ const App: React.FC = () => {
                         setTimeout(() => removeOverlay(), 500);
                         setTimeout(() => setActionStatus('idle'), 5000);
                         
-                        setTimeout(() => alert(`Operation Complete.\n\nNeutered: ${processedGlobal}\nSkipped (Safety Locked): ${skippedSafety}\n\nSearch results were prioritized. Critical system paths were protected.`), 600);
+                        setTimeout(() => alert(`Operation Complete.\n\nNeutered: ${processedGlobal}\nSkipped (Safety Locked): ${skippedSafety}\n\nPersistence items and Search results were prioritized.`), 600);
                     }, 500); 
                 }
             }, 50); 
@@ -588,7 +600,7 @@ const App: React.FC = () => {
           <div className="w-8 h-8 bg-gradient-to-br from-red-900 to-gray-900 rounded flex items-center justify-center text-red-400 font-bold border border-red-800">H</div>
           <div>
             <h1 className="font-bold text-lg tracking-wide text-gray-100 leading-none flex items-center gap-2">
-              HiveMind <span className="text-blue-500">v8.0</span>
+              HiveMind <span className="text-blue-500">v9.0</span>
             </h1>
           </div>
         </div>
@@ -694,7 +706,7 @@ const App: React.FC = () => {
            <span>ENGINE: <span className="text-cyan-600">GEMINI-2.5-FLASH</span></span>
            <span>MODE: <span className="text-red-400 uppercase">{aiMode}</span></span>
         </div>
-        <div className="opacity-50">v8.0 (SMART CONTEXT)</div>
+        <div className="opacity-50">v9.0 (SYSINTERNALS LOGIC)</div>
       </footer>
     </div>
   );

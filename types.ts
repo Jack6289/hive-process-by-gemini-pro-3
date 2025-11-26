@@ -35,7 +35,7 @@ export interface ScanFinding {
   id: string;
   offset: number;
   length: number;
-  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_NULL_EMBEDDED' | 'ROOTKIT_CLASS_INJECTION' | 'ROOTKIT_UNLINKED_DKOM';
+  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_NULL_EMBEDDED' | 'ROOTKIT_CLASS_INJECTION' | 'ROOTKIT_UNLINKED_DKOM' | 'PERSISTENCE_MECHANISM';
   name: string;
   description: string;
   confidence: number;
@@ -46,6 +46,8 @@ export interface ScanFinding {
   // v8.0 Safety Fields
   isSystemCritical?: boolean;
   subkeyCount?: number;
+  // v9.0 Association Fields
+  associatedOffsets?: number[]; // Offsets of related keys (e.g. Service -> Enum)
 }
 
 export enum AnalysisMode {
