@@ -1,5 +1,5 @@
 {
   "name": "HiveMind Forensics",
-  "description": "v9.0 Sysinternals Logic Core: Ported Autoruns ASEP knowledge base for advanced persistence detection. Implemented Service/Enum dependency association for clean removal without corruption.",
+  "description": "v10.1 Smart Hive Detection: Automatically identifies loaded hive type (SOFTWARE, SYSTEM, NTUSER) and adjusts scanning heuristics accordingly.",
   "requestFramePermissions": []
 }

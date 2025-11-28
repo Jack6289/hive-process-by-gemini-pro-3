@@ -35,7 +35,7 @@ export interface ScanFinding {
   id: string;
   offset: number;
   length: number;
-  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_NULL_EMBEDDED' | 'ROOTKIT_CLASS_INJECTION' | 'ROOTKIT_UNLINKED_DKOM' | 'PERSISTENCE_MECHANISM';
+  type: 'VIRTUALIZED' | 'STUBBORN' | 'CORRUPT' | 'HIDDEN' | 'SEARCH_MATCH' | 'COMPOSITE' | 'RECOVERED_KEY' | 'DATA_REMNANT' | 'DESTROYED_ARTIFACT' | 'ROOTKIT_NULL_EMBEDDED' | 'ROOTKIT_CLASS_INJECTION' | 'ROOTKIT_UNLINKED_DKOM' | 'PERSISTENCE_MECHANISM' | 'INSTALLER_ARTIFACT';
   name: string;
   description: string;
   confidence: number;
@@ -48,6 +48,10 @@ export interface ScanFinding {
   subkeyCount?: number;
   // v9.0 Association Fields
   associatedOffsets?: number[]; // Offsets of related keys (e.g. Service -> Enum)
+  // v9.1 Search Context
+  isSearchMatch?: boolean;
+  // v10.0 Installer Context
+  relatedProgramName?: string;
 }
 
 export enum AnalysisMode {
@@ -57,5 +61,6 @@ export enum AnalysisMode {
   COMPOSITE_LAYERING = 'COMPOSITE_LAYERING',     
   INTEGRITY_RECOVERY = 'INTEGRITY_RECOVERY',
   ROOTKIT_HEURISTIC = 'ROOTKIT_HEURISTIC',       // v3.0/v3.1: Active Engine
-  SCRIPT_GENERATION = 'SCRIPT_GENERATION'        // v3.0: New Engine
+  SCRIPT_GENERATION = 'SCRIPT_GENERATION',       // v3.0: New Engine
+  INSTALLER_TROUBLESHOOTER = 'INSTALLER_TROUBLESHOOTER' // v10.0: Program FixIt
 }

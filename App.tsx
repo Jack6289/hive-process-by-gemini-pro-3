@@ -2,46 +2,36 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import HexViewer from './components/HexViewer';
 import AnalysisPanel from './components/AnalysisPanel';
-import { scanHiveForAnomalies, searchHive } from './services/hiveScanner';
+import { scanHiveForAnomalies, searchHive, searchProgramArtifacts } from './services/hiveScanner';
 import { reconcileMultipleLogs, ReconcileResult } from './services/logReconciler';
 import { ScanFinding } from './types';
+import { HiveGraph } from './services/inferenceEngine';
 
 // --- CRITICAL KERNEL-SAFE UTILITIES (v7.1) ---
 
-// 1. Kernel-Safe Neuter with DIFF LOGGING
 const neuterKeyNode = (buffer: Uint8Array, offset: number, providedView?: DataView): string[] => {
     const view = providedView || new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
     const changes: string[] = [];
 
-    // Helper to log changes
-    const logChange = (field: string, oldVal: any, newVal: any) => {
-        changes.push(`[NEUTER] Offset 0x${offset.toString(16)}: ${field} ${oldVal} -> ${newVal}`);
-    };
-
-    // A. Update Timestamp
     const oldTime = view.getBigUint64(offset + 0x04, true);
     const nowMs = BigInt(Date.now());
     const fileTime = (nowMs + 11644473600000n) * 10000n; 
     view.setBigUint64(offset + 0x04, fileTime, true);
-    // logChange("Timestamp", oldTime, fileTime);
 
-    // B. Clear Subkeys
     const oldSubCount = view.getUint32(offset + 0x14, true);
     view.setUint32(offset + 0x14, 0, true); 
-    if(oldSubCount !== 0) logChange("SubkeyCount", oldSubCount, 0);
+    if(oldSubCount !== 0) changes.push(`[NEUTER] SubkeyCount ${oldSubCount} -> 0`);
 
     view.setUint32(offset + 0x18, 0, true); 
     view.setInt32(offset + 0x1C, -1, true); 
     view.setInt32(offset + 0x20, -1, true); 
 
-    // C. Clear Values
     const oldValCount = view.getUint32(offset + 0x24, true);
     view.setUint32(offset + 0x24, 0, true); 
-    if(oldValCount !== 0) logChange("ValueCount", oldValCount, 0);
+    if(oldValCount !== 0) changes.push(`[NEUTER] ValueCount ${oldValCount} -> 0`);
 
     view.setInt32(offset + 0x28, -1, true); 
 
-    // E. v6.1 CRITICAL FIX: Zero out Max Length Statistics
     view.setUint32(offset + 0x34, 0, true); 
     view.setUint32(offset + 0x38, 0, true); 
     view.setUint32(offset + 0x3C, 0, true); 
@@ -50,7 +40,6 @@ const neuterKeyNode = (buffer: Uint8Array, offset: number, providedView?: DataVi
     return changes;
 };
 
-// 2. Fix Hive Header & Sync Sequences & LENGTH (v7.0 STRICT)
 const fixHiveHeader = (buffer: Uint8Array): string[] => {
     const logs: string[] = [];
     if (buffer.length < 0x1000) return ["ERROR: File too small"];
@@ -59,25 +48,20 @@ const fixHiveHeader = (buffer: Uint8Array): string[] => {
     
     if (view.getUint32(0, true) !== 0x66676572) return ["ERROR: Invalid Signature"];
 
-    // A. Update Base Block Timestamp
     const nowMs = BigInt(Date.now());
     const fileTime = (nowMs + 11644473600000n) * 10000n; 
     view.setBigUint64(0x0C, fileTime, true);
 
-    // B. Sync Sequence Numbers
     const seq = view.getUint32(0x04, true);
     view.setUint32(0x04, seq + 1, true); 
     view.setUint32(0x08, seq + 1, true); 
     logs.push(`[HEADER] Sequence bumped to ${seq + 1}`);
 
-    // C. v6.4 FIX: Update File Length Header (Offset 0x28)
     const dataLength = buffer.length - 0x1000;
     const oldLen = view.getUint32(0x28, true);
     view.setUint32(0x28, dataLength, true);
     if(oldLen !== dataLength) logs.push(`[HEADER] Length corrected: ${oldLen} -> ${dataLength}`);
 
-    // D. Recalculate XOR Checksum
-    // v7.0: ZERO OUT CHECKSUM FIELD FIRST
     view.setUint32(0x1FC, 0, true); 
     
     let xorSum = 0;
@@ -86,11 +70,74 @@ const fixHiveHeader = (buffer: Uint8Array): string[] => {
     }
     
     view.setUint32(0x1FC, xorSum, true);
-    // Fix: Display as unsigned hex
     logs.push(`[HEADER] New Checksum: 0x${(xorSum >>> 0).toString(16).toUpperCase()}`);
     
     return logs;
 };
+
+// --- v10.1 UTILS: HIVE TYPE DETECTION ---
+const detectHiveType = (data: Uint8Array): string => {
+    try {
+        const graph = new HiveGraph(data);
+        const rootOffset = graph.getRootOffset();
+        if (!rootOffset) return "UNKNOWN";
+        
+        // Strategy: Check root node name (Standard behavior, sometimes root is nameless, check children)
+        const rootName = graph.readNodeName(rootOffset);
+        
+        // Sometimes hives are mounted with generic names like 'CMI-CreateHive...'. 
+        // We check first level children for signature keys.
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        const subkeyCount = view.getUint32(rootOffset + 0x14, true);
+        const listIndex = view.getUint32(rootOffset + 0x1C, true);
+        
+        // Simple scan of first few children names
+        const childrenNames: string[] = [];
+        if (subkeyCount > 0 && listIndex !== -1) {
+             const listOffset = graph.resolveCellOffset(listIndex);
+             // Just grab first child to check common patterns
+             // Implementation simplified for reliability: Just tree-walk a bit
+             // ... Or we scan the file for characteristic strings near the start
+             // Actually, let's use the graph resolution from HiveScanner logic if exposed, 
+             // but here we are in App.tsx. Let's do a quick heuristic scan of NK records near start.
+        }
+
+        // HEURISTIC SCAN (Fast & Reliable)
+        // Scan first 50 NK records for specific keywords
+        let cursor = 0x1020; 
+        const limit = Math.min(data.length, 0x50000); // Scan first 300KB
+        let hasMicrosoft = false;
+        let hasClasses = false;
+        let hasControlSet = false;
+        let hasSAM = false;
+        let hasAppEvents = false;
+
+        while(cursor < limit) {
+             if (view.getUint16(cursor, true) === 0x6B6E) { // NK
+                 const name = graph.readNodeName(cursor);
+                 if (name === "Microsoft") hasMicrosoft = true;
+                 if (name === "Classes") hasClasses = true;
+                 if (name.startsWith("ControlSet")) hasControlSet = true;
+                 if (name === "SAM") hasSAM = true;
+                 if (name === "AppEvents" || name === "Console") hasAppEvents = true;
+             }
+             cursor += 8;
+        }
+
+        if (hasControlSet) return "SYSTEM";
+        if (hasMicrosoft && hasClasses) return "SOFTWARE";
+        if (hasSAM) return "SAM";
+        if (hasAppEvents) return "NTUSER.DAT";
+
+        // Fallback
+        if (rootName && rootName.length > 1) return rootName.toUpperCase();
+        return "GENERIC HIVE";
+
+    } catch (e) {
+        return "UNKNOWN";
+    }
+};
+
 
 // --- VANILLA DOM OVERLAY HELPERS ---
 const OVERLAY_ID = 'hivemind-progress-overlay';
@@ -153,7 +200,6 @@ const removeOverlay = () => {
     }
 };
 
-// --- CUSTOM CONFIRMATION MODAL ---
 const ConfirmationModal = ({ count, onConfirm, onCancel }: { count: number, onConfirm: () => void, onCancel: () => void }) => {
   const isMassDestruction = count > 100;
 
@@ -170,13 +216,11 @@ const ConfirmationModal = ({ count, onConfirm, onCancel }: { count: number, onCo
           {isMassDestruction && (
               <div className="bg-red-950/50 border border-red-900 p-3 rounded mb-4 text-red-200 text-xs">
                   <strong>SMART TARGETING ENABLED:</strong> 
-                  <br/>
-                  Batch operation will strictly enforce SYSTEM SAFETY:
                   <ul className="list-disc pl-4 mt-1 space-y-1">
-                      <li>Deleting <strong>Search Results</strong> is allowed (User Intent).</li>
-                      <li>Deleting <strong>High-Confidence Rootkits</strong> is allowed.</li>
+                      <li>Deleting <strong>Installer Artifacts</strong> is allowed.</li>
+                      <li>Deleting <strong>Search Results</strong> is allowed.</li>
+                      <li>Deleting <strong>Persistence</strong> is allowed.</li>
                       <li><strong>CRITICAL BOOT KEYS</strong> are <span className="text-red-400 font-bold">LOCKED</span> (Skipped).</li>
-                      <li>Keys with {'>'}20 subkeys are <span className="text-red-400 font-bold">SKIPPED</span> (Too Risky).</li>
                   </ul>
               </div>
           )}
@@ -206,8 +250,8 @@ const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [reconcileStats, setReconcileStats] = useState<ReconcileResult | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [hiveType, setHiveType] = useState<string>('UNKNOWN');
   
-  // Confirmation Modal State
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [batchNeuterCount, setBatchNeuterCount] = useState(0);
   
@@ -245,69 +289,56 @@ const App: React.FC = () => {
     setSelectionRange({ start, end: actualEnd });
   }, [fileData]);
 
-  // v7.3: Native File System Access API Support
   const handleNativeFileOpen = async () => {
     if ('showOpenFilePicker' in window) {
         try {
-            // @ts-ignore - TS might not have types for this yet
+            // @ts-ignore
             const [fileHandle] = await window.showOpenFilePicker({
                 types: [{
                     description: 'Windows Registry Hives',
-                    accept: {
-                        'application/octet-stream': ['.dat', '.', ''] 
-                    }
+                    accept: { 'application/octet-stream': ['.dat', '.', ''] }
                 }],
                 multiple: false
             });
-            
             const file = await fileHandle.getFile();
-            
-            // SECURITY CHECK: Locked files often report 0 bytes
             if (file.size === 0) {
-                alert("ACCESS DENIED: The selected file is currently LOCKED by the operating system.\n\nRegistry hives (like SYSTEM, SOFTWARE) cannot be edited while Windows is running.\n\nPlease copy the file to a different location (e.g., Desktop) or use 'reg save' command before analyzing.");
+                alert("ACCESS DENIED: File locked by OS.");
                 return;
             }
-
             const buffer = await file.arrayBuffer();
-            const uint8 = new Uint8Array(buffer.slice(0, 512 * 1024 * 1024)); // 512MB limit
-            
-            setFileData(uint8);
-            setFileName(file.name);
-            setScanResults([]); 
-            setLogs([]);
-            addLog(`File Opened (Native Auth): ${file.name} (${(uint8.length / 1024 / 1024).toFixed(2)} MB)`);
-
+            loadBuffer(buffer, file.name);
         } catch (err) {
-            // User cancelled or error
-            if ((err as Error).name !== 'AbortError') {
-                console.error("FS API Error:", err);
-                // Fallback to old input
-                fileInputRef.current?.click();
-            }
+            if ((err as Error).name !== 'AbortError') fileInputRef.current?.click();
         }
     } else {
-        // Fallback for browsers without API support
         fileInputRef.current?.click();
     }
   };
 
-  // Fallback Legacy Upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
       if (event.target?.result) {
-        const buffer = event.target.result as ArrayBuffer;
-        const uint8 = new Uint8Array(buffer.slice(0, 512 * 1024 * 1024));
-        setFileData(uint8);
-        setFileName(file.name);
-        setScanResults([]); 
-        setLogs([]);
-        addLog("File Loaded: " + file.name + " (" + (uint8.length / 1024 / 1024).toFixed(2) + " MB)");
+         loadBuffer(event.target.result as ArrayBuffer, file.name);
       }
     };
     reader.readAsArrayBuffer(file);
+  };
+
+  const loadBuffer = (buffer: ArrayBuffer, name: string) => {
+     const uint8 = new Uint8Array(buffer.slice(0, 512 * 1024 * 1024));
+     setFileData(uint8);
+     setFileName(name);
+     setScanResults([]); 
+     setLogs([]);
+     
+     // v10.1 Auto-Detect Type
+     const detectedType = detectHiveType(uint8);
+     setHiveType(detectedType);
+     addLog(`File Loaded: ${name} (${(uint8.length / 1024 / 1024).toFixed(2)} MB)`);
+     addLog(`Hive Type Detected: ${detectedType}`);
   };
   
   const handleLogUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -317,9 +348,7 @@ const App: React.FC = () => {
     const readers = files.map((file: File) => new Promise<Uint8Array>((resolve) => {
       const reader = new FileReader();
       reader.onload = (evt) => {
-        if (evt.target?.result) {
-          resolve(new Uint8Array(evt.target.result as ArrayBuffer));
-        }
+        if (evt.target?.result) resolve(new Uint8Array(evt.target.result as ArrayBuffer));
       };
       reader.readAsArrayBuffer(file);
     }));
@@ -331,12 +360,31 @@ const App: React.FC = () => {
         setReconcileStats(result);
         setScanResults([]); 
         addLog(`Logs Merged: ${result.logsProcessed}, Seq: ${result.finalSequence}`);
-        alert(`Logs Applied Successfully.\n\nPatches: ${result.patchesApplied}\nExpanded: ${result.bytesExpanded} bytes\nFiles Merged: ${result.logsProcessed}\nFinal Seq: ${result.finalSequence}\n\nPlease re-scan to find new or modified keys.`);
+        alert(`Logs Applied Successfully.\n\nPlease re-scan.`);
       } catch (err) {
         alert("Log Replay Failed: " + err);
       }
     });
   };
+
+  const handleTroubleshootProgram = useCallback((name: string) => {
+     if (!fileData || !name) return;
+     addLog(`Troubleshooting Program: ${name} (Hive: ${hiveType})`);
+     setAiMode('INSTALLER_TROUBLESHOOTER');
+     
+     setTimeout(() => {
+        // v10.1 Pass hive type for smarter scanning
+        const findings = searchProgramArtifacts(fileData, name, hiveType);
+        setScanResults(findings);
+        addLog(`Found ${findings.length} artifacts.`);
+        if (findings.length > 0) {
+            const f = findings[0];
+            onSelectionChange(f.offset, f.offset + f.length - 1);
+        } else {
+            alert(`No MSI/Installer artifacts found for "${name}".`);
+        }
+     }, 100);
+  }, [fileData, onSelectionChange, addLog, hiveType]);
 
   const performSearch = useCallback(() => {
       if (!fileData || !searchQuery) return;
@@ -397,11 +445,10 @@ const App: React.FC = () => {
     const newBuffer = new Uint8Array(fileData);
     newBuffer.set(bytes, offset);
     setFileData(newBuffer);
-    addLog(`Manual Patch at 0x${offset.toString(16)} (${bytes.length} bytes)`);
+    addLog(`Manual Patch at 0x${offset.toString(16)}`);
     onSelectionChange(offset, offset + bytes.length - 1, newBuffer);
   }, [fileData, onSelectionChange, addLog]);
 
-  // --- ROBUST BATCH PROCESSING LOOP (v9.0 SYSINTERNALS SMART) ---
   const startProcessingLoop = (
       sourceData: Uint8Array, 
       sourceResults: ScanFinding[], 
@@ -422,21 +469,15 @@ const App: React.FC = () => {
                 while (scanIndex < workingScanResults.length && chunkProcessed < CHUNK_SIZE) {
                     const f = workingScanResults[scanIndex];
                     if (f && !f.isDeleted) {
-                        // v9.0 SAFETY POLICY UPDATE:
-                        // 1. SYSTEM CRITICAL KEYS: LOCKED (Always Skip)
-                        // 2. SEARCH MATCHES: ALLOWED (User Intent)
-                        // 3. PERSISTENCE (Autoruns): ALLOWED (High Priority)
-                        // 4. ROOTKITS: ALLOWED (High Confidence)
-                        // 5. MASSIVE TREES (>20 children): SKIPPED (Cascade Risk)
-                        
                         const isCritical = f.isSystemCritical;
                         const isMassive = (f.subkeyCount || 0) > 20; 
                         const isIntentional = f.type === 'SEARCH_MATCH';
+                        const isInstaller = f.type === 'INSTALLER_ARTIFACT'; 
                         const isPersistence = f.type === 'PERSISTENCE_MECHANISM';
                         const isRootkit = f.confidence >= 0.8 || f.type === 'ROOTKIT_NULL_EMBEDDED' || f.type === 'ROOTKIT_CLASS_INJECTION';
 
                         const shouldDelete = !isCritical && (
-                            (isIntentional || isPersistence) || 
+                            (isIntentional || isInstaller || isPersistence) || 
                             (isRootkit && !isMassive)
                         );
                         
@@ -444,24 +485,13 @@ const App: React.FC = () => {
                             try {
                                 if (f.offset + 0x50 < newBuffer.length) {
                                     neuterKeyNode(newBuffer, f.offset, mainView);
-                                    
-                                    // v9.0 ASSOCIATION LOGIC:
-                                    // If finding has associated dependencies (e.g. Service -> Enum), delete them too if safe.
-                                    if (f.associatedOffsets && f.associatedOffsets.length > 0) {
-                                        f.associatedOffsets.forEach(assocOffset => {
-                                            // Ensure not out of bounds
-                                            if (assocOffset + 0x50 < newBuffer.length) {
-                                                neuterKeyNode(newBuffer, assocOffset, mainView);
-                                            }
-                                        });
+                                    if (f.associatedOffsets) {
+                                        f.associatedOffsets.forEach(ao => { if (ao + 0x50 < newBuffer.length) neuterKeyNode(newBuffer, ao, mainView); });
                                     }
-
                                     workingScanResults[scanIndex] = { ...f, isDeleted: true };
                                 }
                                 processedGlobal++;
-                            } catch (e) {
-                                console.warn("Skipping key error", e);
-                            }
+                            } catch (e) { console.warn(e); }
                         } else {
                             skippedSafety++;
                         }
@@ -471,28 +501,24 @@ const App: React.FC = () => {
                 }
 
                 const pct = totalActive > 0 ? Math.floor((scanIndex / sourceResults.length) * 100) : 100;
-                updateOverlay(pct, `${processedGlobal} Neutered / ${skippedSafety} Locked`, "Sysinternals Heuristics...");
+                updateOverlay(pct, `${processedGlobal} Neutered / ${skippedSafety} Locked`, "FixIt Logic...");
 
                 if (scanIndex >= workingScanResults.length) {
                     clearInterval(interval);
                     updateOverlay(100, "Done!", "Finalizing...");
-
                     setTimeout(() => {
                         setFileData(newBuffer);
                         setScanResults(workingScanResults);
                         setActionStatus('completed');
-                        addLog(`Batch Complete: ${processedGlobal} processed. ${skippedSafety} skipped (Critical/Safety).`);
-                        
+                        addLog(`Batch Complete: ${processedGlobal} processed. ${skippedSafety} skipped.`);
                         setTimeout(() => removeOverlay(), 500);
                         setTimeout(() => setActionStatus('idle'), 5000);
-                        
-                        setTimeout(() => alert(`Operation Complete.\n\nNeutered: ${processedGlobal}\nSkipped (Safety Locked): ${skippedSafety}\n\nPersistence items and Search results were prioritized.`), 600);
+                        setTimeout(() => alert(`Complete.\n\nNeutered: ${processedGlobal}\nSkipped: ${skippedSafety}`), 600);
                     }, 500); 
                 }
             }, 50); 
        } catch (err) {
-            const errMsg = "Batch Processing Exception: " + err;
-            alert(errMsg);
+            alert("Error: " + err);
             removeOverlay();
             setActionStatus('idle');
        }
@@ -501,37 +527,27 @@ const App: React.FC = () => {
   const triggerBatchDelete = useCallback(() => {
     const currentResults = scanResultsRef.current;
     const currentData = fileDataRef.current;
-
-    if (!currentData || !currentResults || currentResults.length === 0) {
-        return;
-    }
-
+    if (!currentData || !currentResults || currentResults.length === 0) return;
     const activeThreatsCount = currentResults.reduce((acc, f) => f.isDeleted ? acc : acc + 1, 0);
-
     if (activeThreatsCount === 0) {
         alert("All detected threats have already been neutered.");
         return;
     }
-
     setBatchNeuterCount(activeThreatsCount);
     setShowConfirmModal(true); 
   }, []);
 
   const executeBatchDelete = useCallback(() => {
       setShowConfirmModal(false); 
-
       const currentData = fileDataRef.current;
       const currentResults = scanResultsRef.current;
-
       if (!currentData || !currentResults) {
-          alert("Error: Data reference lost. Please reload file.");
+          alert("Error: Data reference lost.");
           return;
       }
-
       setActionStatus('processing');
       injectOverlay();
       updateOverlay(0, "Initializing...", "Allocating Buffer");
-
       setTimeout(() => {
           startProcessingLoop(currentData, currentResults, batchNeuterCount);
       }, 100);
@@ -539,35 +555,24 @@ const App: React.FC = () => {
 
   const verifyIntegrity = () => {
       if (!fileData) return;
-      
-      addLog("Starting Integrity Verification...");
       const view = new DataView(fileData.buffer, fileData.byteOffset, fileData.byteLength);
-      
       const sig = view.getUint32(0, true);
       const isSigValid = sig === 0x66676572;
-      addLog(`Signature: ${isSigValid ? 'OK' : 'FAIL'} (0x${sig.toString(16)})`);
-
       const lenHeader = view.getUint32(0x28, true);
       const expectedLen = fileData.length - 0x1000;
       const isLenValid = lenHeader === expectedLen;
-      addLog(`Length Header: 0x${lenHeader.toString(16)} (File: 0x${expectedLen.toString(16)}) - ${isLenValid ? 'OK' : 'MISMATCH'}`);
-
       const seq1 = view.getUint32(0x04, true);
       const seq2 = view.getUint32(0x08, true);
-      const isSeqValid = seq1 === seq2;
-      addLog(`Sequence: ${seq1} vs ${seq2} - ${isSeqValid ? 'OK' : 'MISMATCH (DIRTY)'}`);
-
+      
       if (!isSigValid || !isLenValid) {
-          alert("CRITICAL INTEGRITY FAILURE.\n\nFile is corrupt and WILL BOOT LOOP Windows.\nCheck diagnostic log below.");
+          alert("CRITICAL INTEGRITY FAILURE.\nFile is corrupt and WILL BOOT LOOP Windows.");
       } else {
-          alert(`Integrity OK.\n\nSeq: ${seq1}\nSize: ${fileData.length} bytes\n\nReady for Download.`);
+          alert(`Integrity OK.\n\nSeq: ${seq1}\nSize: ${fileData.length} bytes`);
       }
   };
 
   const handleDownload = () => {
     if (!fileData) return;
-    
-    // v6.4 FIX: Fix Header Checksum, Sequence AND LENGTH
     const newBuffer = new Uint8Array(fileData);
     const logs = fixHiveHeader(newBuffer);
     logs.forEach(l => addLog(l));
@@ -585,8 +590,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-gray-950 text-gray-100 font-sans selection:bg-cyan-500/30 relative">
-      
-      {/* CUSTOM MODAL */}
       {showConfirmModal && (
         <ConfirmationModal 
             count={batchNeuterCount} 
@@ -600,12 +603,11 @@ const App: React.FC = () => {
           <div className="w-8 h-8 bg-gradient-to-br from-red-900 to-gray-900 rounded flex items-center justify-center text-red-400 font-bold border border-red-800">H</div>
           <div>
             <h1 className="font-bold text-lg tracking-wide text-gray-100 leading-none flex items-center gap-2">
-              HiveMind <span className="text-blue-500">v9.0</span>
+              HiveMind <span className="text-blue-500">v10.1</span>
             </h1>
           </div>
         </div>
         
-        {/* Search Bar */}
         {fileData && (
           <div className="flex-1 max-w-xl mx-8 relative">
               <input 
@@ -616,11 +618,7 @@ const App: React.FC = () => {
                   placeholder="Search keys... (Press Enter)"
                   className="w-full bg-black/40 border border-gray-800 rounded-lg px-4 py-1.5 text-xs text-cyan-300 focus:outline-none focus:border-cyan-700 placeholder-gray-600 transition-colors"
               />
-              <button 
-                onClick={performSearch}
-                className="absolute right-2 top-1.5 p-0.5 hover:bg-gray-800 rounded text-gray-500 hover:text-cyan-400 transition-colors"
-                title="Perform Search"
-              >
+              <button onClick={performSearch} className="absolute right-2 top-1.5 p-0.5 hover:bg-gray-800 rounded text-gray-500 hover:text-cyan-400 transition-colors">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
               </button>
           </div>
@@ -630,7 +628,7 @@ const App: React.FC = () => {
              {fileData && (
                <>
                  <button onClick={verifyIntegrity} className="px-3 py-1.5 bg-purple-900/20 hover:bg-purple-900/40 text-purple-400 border border-purple-900/50 text-xs font-bold rounded uppercase tracking-wide">
-                   Verify Hive
+                   Verify
                  </button>
                  <button onClick={() => logInputRef.current?.click()} className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700 text-xs font-bold rounded uppercase tracking-wide">
                    Load Logs
@@ -639,15 +637,14 @@ const App: React.FC = () => {
                    {isScanning ? 'Scanning...' : 'Threat Scan'}
                  </button>
                  <button onClick={handleDownload} className="px-3 py-1.5 bg-green-900/20 hover:bg-green-900/40 text-green-400 border border-green-900/50 text-xs font-bold rounded uppercase tracking-wide">
-                   Download Hive
+                   Download
                  </button>
                </>
              )}
              <div className="flex gap-2 ml-2">
                 <input type="file" ref={logInputRef} className="hidden" multiple accept=".log,.log1,.log2" onChange={handleLogUpload} />
                 <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload}/>
-                {/* Fallback Legacy Upload - Hidden if Native works, or handled inside function */}
-                <button onClick={handleNativeFileOpen} className="p-1.5 bg-gray-800 hover:bg-gray-700 rounded text-gray-400 hover:text-white border border-gray-700" title="Open Local Hive">
+                <button onClick={handleNativeFileOpen} className="p-1.5 bg-gray-800 hover:bg-gray-700 rounded text-gray-400 hover:text-white border border-gray-700">
                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" /></svg>
                 </button>
              </div>
@@ -661,9 +658,7 @@ const App: React.FC = () => {
                 <div className="h-8 bg-gray-900 border-b border-gray-800 flex items-center px-4 text-xs text-gray-500 gap-4">
                    <span className="text-gray-500 font-mono">OFFSET: {selectionOffset.toString(16).toUpperCase()}</span>
                    <span className={scanResults.length > 0 ? "text-red-400 font-bold" : ""}>{scanResults.length} THREATS</span>
-                   {reconcileStats && (
-                       <span className="text-green-500 ml-auto">LOGS MERGED: {reconcileStats.logsProcessed} (SEQ: {reconcileStats.finalSequence})</span>
-                   )}
+                   {reconcileStats && <span className="text-green-500 ml-auto">LOGS MERGED: {reconcileStats.logsProcessed}</span>}
                 </div>
                 <div className="flex-1 overflow-hidden relative">
                    <HexViewer 
@@ -672,22 +667,20 @@ const App: React.FC = () => {
                    />
                 </div>
                 
-                {/* v7.0 DIAGNOSTIC TERMINAL (RESTORED) */}
                 <div className="h-32 bg-black border-t border-gray-800 p-2 overflow-y-auto font-mono text-[10px] text-green-400 opacity-90 z-30">
                    <div className="flex justify-between border-b border-gray-800 mb-1 pb-1 text-gray-500">
-                      <span>DIAGNOSTIC & DIFF LOG</span>
+                      <span>DIAGNOSTIC LOG</span>
                       <button onClick={() => setLogs([])} className="hover:text-white">CLEAR</button>
                    </div>
-                   {logs.length === 0 && <div className="text-gray-600 italic">Ready.</div>}
                    {logs.map((l, i) => <div key={i}>{l}</div>)}
                 </div>
-
             </div>
             <AnalysisPanel 
               selectedBytes={selectedBytes} selectionOffset={selectionOffset} scanResults={scanResults}
               onSelectFinding={handleSelectFinding} onDeleteFinding={handleDeleteKey}
               onDeleteAll={triggerBatchDelete} onPatchBytes={handlePatchBytes} onContextChange={handleContextChange}
-              onModeChange={setAiMode} actionStatus={actionStatus} 
+              onModeChange={setAiMode} onTroubleshootProgram={handleTroubleshootProgram}
+              actionStatus={actionStatus} hiveType={hiveType}
             />
           </>
         ) : (
@@ -704,9 +697,9 @@ const App: React.FC = () => {
       <footer className="h-7 bg-gray-900 border-t border-gray-800 flex items-center px-4 text-[10px] text-gray-600 justify-between shrink-0 select-none">
         <div className="flex gap-6 font-mono">
            <span>ENGINE: <span className="text-cyan-600">GEMINI-2.5-FLASH</span></span>
-           <span>MODE: <span className="text-red-400 uppercase">{aiMode}</span></span>
+           <span>MODE: <span className="text-blue-400 uppercase">{aiMode}</span></span>
         </div>
-        <div className="opacity-50">v9.0 (SYSINTERNALS LOGIC)</div>
+        <div className="opacity-50">v10.1 (SMART HIVE DETECT)</div>
       </footer>
     </div>
   );

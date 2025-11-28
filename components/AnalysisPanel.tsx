@@ -14,7 +14,9 @@ interface AnalysisPanelProps {
   onPatchBytes?: (offset: number, bytes: Uint8Array) => void;
   onContextChange?: (offset: number, length: number) => void;
   onModeChange?: (mode: string) => void;
+  onTroubleshootProgram?: (name: string) => void; // New Prop
   actionStatus?: 'idle' | 'starting' | 'processing' | 'completed';
+  hiveType?: string; // New Prop
 }
 
 // Optimized Component with Memoization to prevent unnecessary re-renders
@@ -28,7 +30,9 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = React.memo(({
   onPatchBytes,
   onContextChange,
   onModeChange,
-  actionStatus = 'idle'
+  onTroubleshootProgram,
+  actionStatus = 'idle',
+  hiveType = 'UNKNOWN'
 }) => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
@@ -41,6 +45,9 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = React.memo(({
   // Context Input State
   const [offsetInput, setOffsetInput] = useState('');
   const [lengthInput, setLengthInput] = useState('');
+
+  // Troubleshooter State
+  const [programNameInput, setProgramNameInput] = useState('');
 
   useEffect(() => {
     if (selectedBytes) {
@@ -97,6 +104,17 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = React.memo(({
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleTroubleshoot = () => {
+      if (hiveType === 'SYSTEM' || hiveType === 'SAM') {
+          const confirmScan = window.confirm(`WARNING: You have loaded a ${hiveType} hive.\n\nInstaller data is typically stored in the SOFTWARE hive (HKLM) or NTUSER.DAT (HKCU).\n\nScanning SYSTEM/SAM for MSI artifacts is unlikely to yield results. Continue anyway?`);
+          if (!confirmScan) return;
+      }
+
+      if (programNameInput && onTroubleshootProgram) {
+          onTroubleshootProgram(programNameInput);
+      }
   };
 
   const handleHexChange = (index: number, value: string) => {
@@ -158,30 +176,74 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = React.memo(({
     { id: AnalysisMode.ROOTKIT_HEURISTIC, label: 'Rootkit & Hook Detection', desc: 'Scan for IFEO, AppInit, and hidden driver hooks.', icon: '☣️' },
     { id: AnalysisMode.SCRIPT_GENERATION, label: 'Generate Repair Script', desc: 'Create Python/PS1 to reconstruct FUBAR hives.', icon: '📜' },
     { id: AnalysisMode.GHOST_VIRTUALIZATION, label: 'Virtualization / Ghost Keys', desc: 'Detect keys existing only in memory/containers.', icon: '👻' },
-    { id: AnalysisMode.ACL_CLOAKING, label: 'ACL Cloaking / Hidden', desc: 'Find keys hidden from System/Admins.', icon: '🛡️' },
-    { id: AnalysisMode.PERMISSION_BYPASS, label: 'Access Denied / Permission', desc: 'Analyze ownership and bypass checks.', icon: '🚫' },
-    { id: AnalysisMode.COMPOSITE_LAYERING, label: 'Composite / Merged Keys', desc: 'Identify dynamic composite views.', icon: '🧩' },
-    { id: AnalysisMode.INTEGRITY_RECOVERY, label: 'Integrity Recovery', desc: 'Fix null bytes and broken headers.', icon: '🩹' },
   ];
+
+  const getFindingIcon = (f: ScanFinding) => {
+      if (f.isDeleted) return '❌';
+      if (f.type === 'INSTALLER_ARTIFACT') return '🛠️'; // v10.0 Icon
+      if (f.type === 'PERSISTENCE_MECHANISM') return '🔥';
+      if (f.type.startsWith('ROOTKIT')) return '💀';
+      if (f.isSearchMatch) return '🔍';
+      return '⚠️';
+  };
+
+  const getFindingColor = (f: ScanFinding) => {
+      if (f.isDeleted) return 'text-gray-600 line-through';
+      if (f.type === 'INSTALLER_ARTIFACT') return 'text-blue-300 font-bold'; // v10.0 Color
+      if (f.type === 'PERSISTENCE_MECHANISM') return 'text-red-400 font-bold';
+      if (f.type.startsWith('ROOTKIT')) return 'text-red-500 font-black';
+      if (f.type === 'SEARCH_MATCH') return 'text-cyan-100'; 
+      return 'text-orange-300';
+  };
 
   return (
     <div className="h-full flex flex-col bg-gray-950 border-l border-gray-800 w-[420px] shadow-2xl z-10">
       <div className="p-5 border-b border-gray-800 bg-gray-900/50">
         <h2 className="text-lg font-bold text-cyan-400 flex items-center gap-2 tracking-wide">
            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
-           AI Engine v9.0 <span className="text-[9px] ml-auto text-purple-400 border border-purple-900 bg-purple-950 px-1 rounded shadow-[0_0_5px_rgba(168,85,247,0.5)]">SYSINTERNALS LOGIC</span>
+           AI Engine v10.1 <span className="text-[9px] ml-auto text-blue-400 border border-blue-900 bg-blue-950 px-1 rounded shadow-[0_0_5px_rgba(59,130,246,0.5)]">SMART HIVE DETECT</span>
         </h2>
-        <p className="text-[10px] text-gray-500 mt-1 font-mono">AUTORUNS & DEPENDENCY ANALYSIS</p>
+        <p className="text-[10px] text-gray-500 mt-1 font-mono">
+            LOADED: <span className="text-white font-bold">{hiveType}</span>
+        </p>
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-6">
+
+        {/* v10.0 Program Troubleshooter Widget */}
+        <div className="bg-blue-900/10 border border-blue-900/30 p-3 rounded-lg">
+           <h3 className="text-[10px] font-bold text-blue-400 uppercase tracking-widest mb-2 flex items-center gap-2">
+             <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+             Program Install/Uninstall Fixer
+           </h3>
+           <div className="flex gap-2">
+             <input 
+               type="text" 
+               placeholder="Program Name (e.g. Siemens)" 
+               className="flex-1 bg-black/40 border border-gray-700 text-[10px] text-white px-2 py-1 rounded focus:border-blue-500 outline-none"
+               value={programNameInput}
+               onChange={(e) => setProgramNameInput(e.target.value)}
+             />
+             <button 
+                onClick={handleTroubleshoot}
+                className="bg-blue-800 hover:bg-blue-700 text-white text-[10px] font-bold px-3 py-1 rounded border border-blue-600 transition-colors"
+             >
+                SCAN
+             </button>
+           </div>
+           <p className="text-[9px] text-blue-300/60 mt-1 italic">
+             {hiveType === 'SOFTWARE' ? 'Software Mode: Scanning UserData & Classes artifacts.' : (
+                hiveType === 'NTUSER.DAT' ? 'User Mode: Scanning HKCU Installer keys.' : 'Scanning generic keys (Hive type mismatch).'
+             )}
+           </p>
+        </div>
         
         {/* Scan Results List */}
         {scanResults.length > 0 && (
            <div className="space-y-2">
              <div className="flex items-end justify-between mb-2">
                 <div className={`text-[10px] font-bold uppercase tracking-widest ${scanResults.length > 1000 ? 'text-orange-500' : 'text-cyan-500'}`}>
-                   Candidates ({scanResults.length})
+                   {scanResults[0]?.type === 'INSTALLER_ARTIFACT' ? 'Installer Artifacts' : (scanResults[0]?.isSearchMatch ? 'Search Results' : 'Candidates')} ({scanResults.length})
                 </div>
                 {showNeuterAll && onDeleteAll && (
                   <button 
@@ -209,28 +271,29 @@ const AnalysisPanel: React.FC<AnalysisPanelProps> = React.memo(({
                   <div 
                     key={finding.id}
                     onClick={() => onSelectFinding(finding)}
-                    className={`p-2 border-b border-gray-800 cursor-pointer text-[10px] font-mono flex justify-between items-center
-                      ${activeFinding?.id === finding.id ? 'bg-cyan-900/30 text-cyan-300' : 'text-gray-400 hover:bg-gray-900'}
-                      ${finding.isDeleted ? 'line-through opacity-50' : ''}
+                    className={`p-2 border-b border-gray-800 cursor-pointer text-[10px] font-mono flex justify-between items-center group hover:bg-gray-900
+                      ${activeFinding?.id === finding.id ? 'bg-cyan-900/30' : ''}
                     `}
                   >
                     <div className="flex flex-col overflow-hidden">
-                        <span className="truncate max-w-[200px] flex items-center gap-1">
+                        <span className={`truncate max-w-[200px] flex items-center gap-1.5 ${getFindingColor(finding)}`}>
+                            <span className="opacity-70">{getFindingIcon(finding)}</span>
                             {finding.isSystemCritical && <span title="System Critical - Protected">🛡️</span>}
-                            {finding.type === 'PERSISTENCE_MECHANISM' && <span title="Sysinternals ASEP - High Risk">🔥</span>}
                             {finding.name}
                         </span>
                         {/* v8.0: Show Subkey count */}
                         {finding.subkeyCount !== undefined && finding.subkeyCount > 0 && (
-                            <span className="text-[8px] text-gray-600">Children: {finding.subkeyCount}</span>
+                            <span className="text-[8px] text-gray-600 pl-5">Children: {finding.subkeyCount}</span>
                         )}
                     </div>
-                    <span className={`opacity-50 ${finding.confidence >= 1.0 || finding.type === 'PERSISTENCE_MECHANISM' ? 'text-red-400 font-bold' : ''}`}>{finding.type.substring(0,4)}</span>
+                    <span className={`opacity-50 ${finding.isSearchMatch ? 'text-[9px]' : ''}`}>
+                        {finding.type === 'SEARCH_MATCH' ? 'MATCH' : (finding.type === 'INSTALLER_ARTIFACT' ? 'FIXIT' : finding.type.substring(0,4))}
+                    </span>
                   </div>
                 ))}
                 {scanResults.length > 500 && (
                     <div className="p-2 text-center text-[9px] text-gray-600 italic border-t border-gray-800">
-                        ... and {scanResults.length - 500} more candidates. Use Search/Filter to find specific keys.
+                        ... and {scanResults.length - 500} more candidates. Use Filter to find specific keys.
                     </div>
                 )}
              </div>
